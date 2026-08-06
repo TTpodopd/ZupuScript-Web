@@ -51,6 +51,6 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    exclude: ['@techstark/opencv-js', 'tesseract.js'],
+    exclude: ['@techstark/opencv-js', 'tesseract.js', 'opencc-js'],
   },
 });

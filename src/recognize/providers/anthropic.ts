@@ -13,6 +13,7 @@ import type {
   RecognizedPageItem,
 } from '../types';
 import { buildGridUserPrompt, GRID_RESPONSE_SCHEMA, PAGE_RESPONSE_SCHEMA, PAGE_USER_PROMPT, SYSTEM_PROMPT } from '../prompt';
+import { TOKENS_PER_CHAR } from '@/lib/constants';
 
 const DEFAULT_ENDPOINT = 'https://api.anthropic.com';
 
@@ -29,12 +30,14 @@ async function callAnthropic(
   toolName: string,
   schema: object,
   signal: AbortSignal,
+  charCount: number,
 ): Promise<{ json: unknown; usage?: { promptTokens: number; completionTokens: number } }> {
   if (!cfg.apiKey) throw new Error('未配置 Anthropic API Key');
   const base = (cfg.proxyUrl || cfg.endpoint || DEFAULT_ENDPOINT).replace(/\/$/, '');
+  const maxTokens = Math.max(2048, charCount * TOKENS_PER_CHAR);
   const body = {
     model: cfg.model,
-    max_tokens: 8192,
+    max_tokens: maxTokens,
     temperature: 0,
     system: SYSTEM_PROMPT,
     messages: [
@@ -115,6 +118,7 @@ export const anthropicProvider: LLMProvider = {
       'submit_grid_recognition',
       GRID_RESPONSE_SCHEMA,
       req.signal,
+      req.batch.ids.length,
     );
     return { items: parseItems(json), usage };
   },
@@ -128,6 +132,7 @@ export const anthropicProvider: LLMProvider = {
       'submit_page_recognition',
       PAGE_RESPONSE_SCHEMA,
       req.signal,
+      500,
     );
     const rawItems = (json as { items: Array<Record<string, unknown>> }).items;
     const items: RecognizedPageItem[] = parseItems(json).map((it, i) => ({

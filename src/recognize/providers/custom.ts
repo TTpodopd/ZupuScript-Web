@@ -13,6 +13,7 @@ import type {
   RecognizedPageItem,
 } from '../types';
 import { buildGridUserPrompt, extractJson, PAGE_USER_PROMPT, SYSTEM_PROMPT } from '../prompt';
+import { TOKENS_PER_CHAR } from '@/lib/constants';
 
 /** 预置端点模板（设置界面下拉） */
 export const ENDPOINT_PRESETS: Array<{ label: string; endpoint: string; model: string }> = [
@@ -34,14 +35,17 @@ async function callCompatible(
   imageBase64: string,
   text: string,
   signal: AbortSignal,
+  charCount: number,
 ): Promise<{ json: unknown; usage?: { promptTokens: number; completionTokens: number } }> {
   const base = (cfg.proxyUrl || cfg.endpoint || '').replace(/\/$/, '');
   if (!base) throw new Error('自定义端点未配置 endpoint');
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
+  const maxTokens = Math.max(2048, charCount * TOKENS_PER_CHAR);
   const body: Record<string, unknown> = {
     model: cfg.model,
     temperature: 0,
+    max_tokens: maxTokens,
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
       {
@@ -107,13 +111,14 @@ export const customProvider: LLMProvider = {
       req.batch.imageBase64Png,
       buildGridUserPrompt(cols, rows, req.batch.ids.length),
       req.signal,
+      req.batch.ids.length,
     );
     return { items: parseItems(json), usage };
   },
 
   async recognizePageImage(req: RecognizeBatchRequest, cfg: ProviderConfig): Promise<RecognizePageResult> {
     if (!req.pageImageBase64) throw new Error('C 模式请求缺少整页图');
-    const { json, usage } = await callCompatible(cfg, req.pageImageBase64, PAGE_USER_PROMPT, req.signal);
+    const { json, usage } = await callCompatible(cfg, req.pageImageBase64, PAGE_USER_PROMPT, req.signal, 500);
     const rawItems = (json as { items: Array<Record<string, unknown>> }).items;
     const items: RecognizedPageItem[] = parseItems(json).map((it, i) => ({
       ...it,

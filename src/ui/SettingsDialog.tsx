@@ -92,6 +92,17 @@ export default function SettingsDialog({ open, onOpenChange }: { open: boolean; 
                 <Label>单项目成本上限（元）</Label>
                 <Input type="number" min={0} step={1} value={settings.projectBudgetCny} onChange={(e) => settings.setProjectBudgetCny(parseFloat(e.target.value) || 0)} />
               </div>
+              <div>
+                <Label>输出字形</Label>
+                <Select
+                  value={settings.outputScript}
+                  onChange={(e) => settings.setOutputScript(e.target.value as 'original' | 'simplified')}
+                  options={[
+                    { value: 'original', label: '原字形（1:1 复刻，默认）' },
+                    { value: 'simplified', label: '简化字' },
+                  ]}
+                />
+              </div>
             </div>
             <p className="text-xs text-muted-foreground">
               API Key 在「分析」页的识别面板中输入与保存（仅存本机，支持仅会话不落盘 / AES-GCM 加密持久化）。

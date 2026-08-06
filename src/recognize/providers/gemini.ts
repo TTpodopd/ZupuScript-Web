@@ -17,6 +17,7 @@ import {
   PAGE_USER_PROMPT,
   SYSTEM_PROMPT,
 } from '../prompt';
+import { TOKENS_PER_CHAR } from '@/lib/constants';
 import type { RecognizedItem, RecognizedPageItem } from '../types';
 
 const DEFAULT_ENDPOINT = 'https://generativelanguage.googleapis.com';
@@ -38,9 +39,12 @@ async function callGemini(
   text: string,
   schema: object,
   signal: AbortSignal,
+  charCount: number,
 ): Promise<{ json: unknown; usage?: { promptTokens: number; completionTokens: number } }> {
   if (!cfg.apiKey) throw new Error('未配置 Gemini API Key');
   const url = `${endpointFor(cfg, cfg.model)}?key=${encodeURIComponent(cfg.apiKey)}`;
+  // max_tokens 动态：字数 × TOKENS_PER_CHAR，防 JSON 截断导致整批失败
+  const maxTokens = Math.max(2048, charCount * TOKENS_PER_CHAR);
   const body = {
     systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
     contents: [
@@ -51,6 +55,7 @@ async function callGemini(
     ],
     generationConfig: {
       temperature: 0,
+      maxOutputTokens: maxTokens,
       responseMimeType: 'application/json',
       responseSchema: schema,
     },
@@ -111,13 +116,14 @@ export const geminiProvider: LLMProvider = {
       buildGridUserPrompt(cols, rows, req.batch.ids.length),
       GRID_RESPONSE_SCHEMA,
       req.signal,
+      req.batch.ids.length,
     );
     return { items: parseItems(json), usage };
   },
 
   async recognizePageImage(req: RecognizeBatchRequest, cfg: ProviderConfig): Promise<RecognizePageResult> {
     if (!req.pageImageBase64) throw new Error('C 模式请求缺少整页图');
-    const { json, usage } = await callGemini(cfg, req.pageImageBase64, PAGE_USER_PROMPT, PAGE_RESPONSE_SCHEMA, req.signal);
+    const { json, usage } = await callGemini(cfg, req.pageImageBase64, PAGE_USER_PROMPT, PAGE_RESPONSE_SCHEMA, req.signal, 500);
     const items = parseItems(json).map((it, i) => {
       const raw = (json as { items: Array<Record<string, unknown>> }).items[i];
       const pageItem: RecognizedPageItem = {

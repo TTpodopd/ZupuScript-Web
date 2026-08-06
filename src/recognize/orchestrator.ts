@@ -4,7 +4,7 @@
  *      校验（数量守恒/单字符/置信度）→ 失败降级本地 Tesseract（全部 conf=0 标红）→
  *      成本估算与审计日志。
  */
-import { CONFIDENCE_THRESHOLD, GRID_BATCH_SIZE } from '@/lib/constants';
+import { CONFIDENCE_THRESHOLD, GRID_BATCH_SIZE, TOKENS_PER_CHAR } from '@/lib/constants';
 import type { CharItem, Page, PrivacyMode } from '@/model/types';
 import { assertModeAllowed } from '@/privacy/consent';
 import { bumpSessionUploads, logAudit } from '@/privacy/audit';
@@ -12,6 +12,7 @@ import { getCache, setCache } from '@/storage/db';
 import { buildGridBatch, hashBatch, pageBinaryToPngBase64 } from '@/segment/grid';
 import { backoffDelay, median, runPool } from '@/lib/utils';
 import { isValidChar } from './prompt';
+import { postprocessItems } from './postprocess';
 import { localOcrChars } from './local/tesseract';
 import type {
   GridBatch,
@@ -207,7 +208,9 @@ export async function recognizePage(
           usageTotal.promptTokens += result.usage.promptTokens;
           usageTotal.completionTokens += result.usage.completionTokens;
         }
-        for (const item of result.items) {
+        // 后处理：字典提权 + 候选兜底 + 异体记录
+        const processed = postprocessItems(result.items, { isGenealogy: true });
+        for (const item of processed) {
           const sliceIndex = batch.ids[item.id];
           const char = slice[sliceIndex];
           if (!char) continue;

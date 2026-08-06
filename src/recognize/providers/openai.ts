@@ -19,6 +19,7 @@ import {
   PAGE_USER_PROMPT,
   SYSTEM_PROMPT,
 } from '../prompt';
+import { TOKENS_PER_CHAR } from '@/lib/constants';
 
 const DEFAULT_ENDPOINT = 'https://api.openai.com';
 
@@ -35,12 +36,15 @@ async function callOpenAI(
   schemaName: string,
   schema: object,
   signal: AbortSignal,
+  charCount: number,
 ): Promise<{ json: unknown; usage?: { promptTokens: number; completionTokens: number } }> {
   if (!cfg.apiKey) throw new Error('未配置 OpenAI API Key');
   const base = (cfg.proxyUrl || cfg.endpoint || DEFAULT_ENDPOINT).replace(/\/$/, '');
+  const maxTokens = Math.max(2048, charCount * TOKENS_PER_CHAR);
   const body = {
     model: cfg.model,
     temperature: 0,
+    max_tokens: maxTokens,
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
       {
@@ -110,13 +114,14 @@ export const openaiProvider: LLMProvider = {
       'grid_recognition',
       GRID_RESPONSE_SCHEMA,
       req.signal,
+      req.batch.ids.length,
     );
     return { items: parseItems(json), usage };
   },
 
   async recognizePageImage(req: RecognizeBatchRequest, cfg: ProviderConfig): Promise<RecognizePageResult> {
     if (!req.pageImageBase64) throw new Error('C 模式请求缺少整页图');
-    const { json, usage } = await callOpenAI(cfg, req.pageImageBase64, PAGE_USER_PROMPT, 'page_recognition', PAGE_RESPONSE_SCHEMA, req.signal);
+    const { json, usage } = await callOpenAI(cfg, req.pageImageBase64, PAGE_USER_PROMPT, 'page_recognition', PAGE_RESPONSE_SCHEMA, req.signal, 500);
     const rawItems = (json as { items: Array<Record<string, unknown>> }).items;
     const items: RecognizedPageItem[] = parseItems(json).map((it, i) => ({
       ...it,

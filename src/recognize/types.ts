@@ -48,6 +48,10 @@ export interface RecognizedItem {
   char: string | null;
   confidence: number;
   note?: CharNote;
+  /** 规范简化字（可选，由模型返回供消歧用） */
+  simplified?: string;
+  /** 形近候选字（可选，看不清时模型返回 1-3 个候选） */
+  candidates?: string[];
 }
 
 /** C 模式返回项：带相对坐标用于与本地分割匹配校验 */

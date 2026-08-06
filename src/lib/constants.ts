@@ -24,8 +24,14 @@ export const CONFIDENCE_THRESHOLD = 0.85;
 export const GRID_BATCH_SIZE = 100;
 /** 拼图网格列数（10×10） */
 export const GRID_COLS = 10;
-/** 单字小图归一尺寸（成本控制：64×64 够用即可） */
-export const GRID_CELL_PX = 64;
+/** 单字小图归一尺寸（木刻版繁体笔画密、断笔多，128×128 保笔画完整） */
+export const GRID_CELL_PX = 128;
+/** 拼图单元格内字符绘制区边距（编号占位 + 四周留白） */
+export const GRID_CELL_PAD = 16;
+/** 二值裁剪后形态学闭运算核半径（像素，修木刻断笔；0 = 关闭） */
+export const GRID_CLOSE_RADIUS = 1;
+/** 拼图编号字体（像素，单元格放大后同步加大以便模型读号） */
+export const GRID_LABEL_FONT_PX = 14;
 /** 大模型并发上限（F4.2 / F11.4） */
 export const MAX_CONCURRENCY = 5;
 export const DEFAULT_TIMEOUT_MS = 60_000;
@@ -33,6 +39,16 @@ export const DEFAULT_MAX_RETRIES = 3;
 /** 单页成本上限默认值（元，F4.10） */
 export const DEFAULT_PAGE_BUDGET_CNY = 0.5;
 export const DEFAULT_PROJECT_BUDGET_CNY = 20;
+
+/* ---------- 识别后处理（字典消歧） ---------- */
+/** 命中姓氏/高频词字典且置信度略低于阈值时，抬升到的置信度（免人工标红） */
+export const DICT_HIT_CONF = 0.86;
+/** conf 极低但 candidates 首候选在字典中时，采用候选并置的置信度（仍标红待人工） */
+export const DICT_CANDIDATE_CONF = 0.8;
+/** 视为「极低置信」的上限：低于此值才考虑采用 candidates 首候选 */
+export const DICT_LOW_CONF_MAX = 0.5;
+/** 大模型 max_tokens 动态系数（约每字 40 token，防整批 JSON 截断） */
+export const TOKENS_PER_CHAR = 40;
 
 /* ---------- 图像算法参数 ---------- */
 /** 自动去斜搜索范围 ±5°（F2.2） */

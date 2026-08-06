@@ -39,6 +39,8 @@ interface SettingsState {
   /** 本次会话累计成本（元） */
   sessionCostCny: number;
   darkMode: boolean;
+  /** 输出字形：原字形（默认，1:1复刻）或简化字 */
+  outputScript: 'original' | 'simplified';
   batchQueue: BatchTask[];
 
   setPrivacyMode: (m: PrivacyMode) => void;
@@ -50,6 +52,7 @@ interface SettingsState {
   setProjectBudgetCny: (n: number) => void;
   addSessionCost: (n: number) => void;
   toggleDarkMode: () => void;
+  setOutputScript: (s: 'original' | 'simplified') => void;
   setBatchQueue: (q: BatchTask[]) => void;
   updateBatchTask: (pageId: string, patch: Partial<BatchTask>) => void;
 }
@@ -66,6 +69,7 @@ export const useSettingsStore = create<SettingsState>()(
       projectBudgetCny: DEFAULT_PROJECT_BUDGET_CNY,
       sessionCostCny: 0,
       darkMode: false,
+      outputScript: 'original',
       batchQueue: [],
 
       setPrivacyMode: (m) => set({ privacyMode: m }),
@@ -77,6 +81,7 @@ export const useSettingsStore = create<SettingsState>()(
       setProjectBudgetCny: (n) => set({ projectBudgetCny: Math.max(0, n) }),
       addSessionCost: (n) => set((s) => ({ sessionCostCny: s.sessionCostCny + n })),
       toggleDarkMode: () => set((s) => ({ darkMode: !s.darkMode })),
+      setOutputScript: (s) => set({ outputScript: s }),
       setBatchQueue: (q) => set({ batchQueue: q }),
       updateBatchTask: (pageId, patch) =>
         set((s) => ({
@@ -95,6 +100,7 @@ export const useSettingsStore = create<SettingsState>()(
         pageBudgetCny: s.pageBudgetCny,
         projectBudgetCny: s.projectBudgetCny,
         darkMode: s.darkMode,
+        outputScript: s.outputScript,
       }),
     },
   ),
