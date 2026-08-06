@@ -2,50 +2,83 @@
 @tailwind components;
 @tailwind utilities;
 
-/* shadcn/ui 约定的主题变量（浅色 / 深色） */
+/* ========== 古风 × 苹果设计系统 ==========
+ * 色彩灵感：宣纸（暖白纸底）、墨（深褐近黑）、朱砂（朱红主色）、鎏金（暗金点缀）
+ * 苹果风格：大圆角、柔和阴影、克制的色彩、流畅过渡
+ */
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 20 14.3% 4.1%;
-    --card: 0 0% 100%;
-    --card-foreground: 20 14.3% 4.1%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 20 14.3% 4.1%;
-    --primary: 24 9.8% 10%;
-    --primary-foreground: 60 9.1% 97.8%;
-    --secondary: 60 4.8% 95.9%;
-    --secondary-foreground: 24 9.8% 10%;
-    --muted: 60 4.8% 95.9%;
-    --muted-foreground: 25 5.3% 44.7%;
-    --accent: 60 4.8% 95.9%;
-    --accent-foreground: 24 9.8% 10%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 60 9.1% 97.8%;
-    --border: 20 5.9% 90%;
-    --input: 20 5.9% 90%;
-    --ring: 20 14.3% 4.1%;
-    --radius: 0.5rem;
+    /* 宣纸底 */
+    --background: 42 30% 96%;       /* #F5F0E6 暖宣纸 */
+    --foreground: 30 15% 14%;       /* #332A20 墨色 */
+
+    /* 卡片：比背景略亮，带纸感 */
+    --card: 42 35% 97.5%;           /* #F9F6F0 */
+    --card-foreground: 30 15% 14%;
+
+    --popover: 42 35% 97.5%;
+    --popover-foreground: 30 15% 14%;
+
+    /* 朱砂主色：沉稳不艳俗 */
+    --primary: 8 60% 42%;           /* #A83A28 朱砂 */
+    --primary-foreground: 42 30% 96%;
+
+    /* 鎏金辅助 */
+    --secondary: 43 25% 90%;        /* #E8DFD0 鎏金底 */
+    --secondary-foreground: 30 20% 25%;
+
+    /* 墨色辅助 */
+    --muted: 42 20% 91%;            /* #EAE4D8 淡墨 */
+    --muted-foreground: 30 12% 40%; /* #6B5F4F 灰墨 */
+
+    /* 强调：淡金 */
+    --accent: 43 25% 90%;
+    --accent-foreground: 30 20% 25%;
+
+    /* 危险：胭脂红 */
+    --destructive: 355 55% 48%;     /* #B33A3A 胭脂 */
+    --destructive-foreground: 42 30% 96%;
+
+    /* 边框：暖灰，不刺眼 */
+    --border: 35 15% 84%;           /* #D8D0C0 */
+    --input: 35 15% 84%;
+    --ring: 8 60% 42%;              /* 朱砂 focus 环 */
+
+    /* 大圆角（苹果风格） */
+    --radius: 0.75rem;
   }
+
   .dark {
-    --background: 20 14.3% 4.1%;
-    --foreground: 60 9.1% 97.8%;
-    --card: 20 14.3% 4.1%;
-    --card-foreground: 60 9.1% 97.8%;
-    --popover: 20 14.3% 4.1%;
-    --popover-foreground: 60 9.1% 97.8%;
-    --primary: 60 9.1% 97.8%;
-    --primary-foreground: 24 9.8% 10%;
-    --secondary: 12 6.5% 15.1%;
-    --secondary-foreground: 60 9.1% 97.8%;
-    --muted: 12 6.5% 15.1%;
-    --muted-foreground: 24 5.4% 63.9%;
-    --accent: 12 6.5% 15.1%;
-    --accent-foreground: 60 9.1% 97.8%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 60 9.1% 97.8%;
-    --border: 12 6.5% 15.1%;
-    --input: 12 6.5% 15.1%;
-    --ring: 24 5.7% 82.9%;
+    /* 暗夜宣：深墨底 */
+    --background: 30 12% 10%;       /* #1C1712 暗夜墨 */
+    --foreground: 42 20% 88%;       /* #E0D8CC 宣白 */
+
+    --card: 30 14% 14%;             /* #241E18 深卡 */
+    --card-foreground: 42 20% 88%;
+
+    --popover: 30 14% 14%;
+    --popover-foreground: 42 20% 88%;
+
+    /* 暗色朱砂：稍亮保可见性 */
+    --primary: 8 55% 48%;           /* #B84A36 */
+    --primary-foreground: 42 30% 96%;
+
+    --secondary: 30 12% 20%;        /* #2E2720 暗金底 */
+    --secondary-foreground: 42 20% 88%;
+
+    --muted: 30 12% 20%;
+    --muted-foreground: 35 12% 55%; /* #9A8F7F */
+
+    --accent: 30 12% 20%;
+    --accent-foreground: 42 20% 88%;
+
+    --destructive: 355 45% 42%;
+    --destructive-foreground: 42 30% 96%;
+
+    --border: 30 10% 22%;           /* #3A332A */
+    --input: 30 10% 22%;
+    --ring: 8 55% 48%;
   }
 }
 
@@ -54,8 +87,83 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground;
-    font-family: 'Noto Serif CJK SC', 'Source Han Serif SC', 'SimSun', serif;
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Noto Serif CJK SC', 'Source Han Serif SC', 'SimSun', '宋体', serif;
+    /* 纸感纹理：微噪点 */
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+    background-size: 128px 128px;
+  }
+  .dark body {
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+  }
+
+  /* 标题：加大字距，古风雅致 */
+  h1, h2, h3 {
+    letter-spacing: 0.05em;
+  }
+
+  /* 全局滚动条：苹果风格细条 */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.25);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.4);
+  }
+
+  /* 选中文字：朱砂淡染 */
+  ::selection {
+    background: hsl(var(--primary) / 0.18);
+  }
+}
+
+@layer components {
+  /* 苹果风格柔和阴影 */
+  .card-shadow {
+    box-shadow:
+      0 1px 2px hsl(var(--foreground) / 0.04),
+      0 2px 8px hsl(var(--foreground) / 0.06);
+  }
+  .card-shadow-lg {
+    box-shadow:
+      0 2px 4px hsl(var(--foreground) / 0.05),
+      0 8px 24px hsl(var(--foreground) / 0.08);
+  }
+
+  /* 古风印章标记 */
+  .seal-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.5em;
+    min-height: 1.5em;
+    padding: 0.1em 0.3em;
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+    font-size: 0.75em;
+    font-weight: 600;
+    border-radius: 3px;
+    letter-spacing: 0.05em;
+  }
+
+  /* 古风分隔线 */
+  .divider-ink {
+    border: none;
+    height: 1px;
+    background: linear-gradient(
+      to right,
+      transparent,
+      hsl(var(--border)) 20%,
+      hsl(var(--border)) 80%,
+      transparent
+    );
   }
 }
 

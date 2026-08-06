@@ -193,19 +193,22 @@ export default function ImportPage() {
       <div className="p-10 text-center text-sm text-muted-foreground">
         请先在「项目」页新建或打开一个项目。
         <div className="mt-4">
-          <Button onClick={() => setView('projects')}>返回项目列表</Button>
+          <Button onClick={() => setView('projects')} className="rounded-xl">返回项目列表</Button>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="mx-auto max-w-4xl p-6">
-      <h1 className="mb-4 text-xl font-semibold">导入图像 · {currentProject()?.name}</h1>
+    <div className="mx-auto max-w-4xl p-8">
+      <h1 className="mb-5 text-2xl font-semibold tracking-wide">导入图像 · {currentProject()?.name}</h1>
 
+      {/* 拖拽导入区 */}
       <div
-        className={`mb-4 rounded-lg border-2 border-dashed p-10 text-center transition-colors ${
-          dragOver ? 'border-primary bg-accent' : 'border-border'
+        className={`mb-6 rounded-2xl border-2 border-dashed p-12 text-center transition-all duration-300 ${
+          dragOver
+            ? 'border-primary bg-primary/5 card-shadow-lg'
+            : 'border-border bg-card card-shadow'
         }`}
         onDragOver={(e) => {
           e.preventDefault();
@@ -223,9 +226,15 @@ export default function ImportPage() {
         onClick={() => fileRef.current?.click()}
         onKeyDown={(e) => e.key === 'Enter' && fileRef.current?.click()}
       >
-        <ImagePlus className="mx-auto mb-2 h-8 w-8 text-muted-foreground" />
-        <p className="text-sm">拖入图像 / PDF，或点击选择文件；也可以直接 Ctrl+V 粘贴剪切板图像</p>
-        <p className="mt-1 text-xs text-muted-foreground">支持 PNG / JPG / WebP（TIFF 请先转换格式）/ PDF</p>
+        <div className={`mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl transition-colors ${
+          dragOver ? 'bg-primary/10' : 'bg-muted/60'
+        }`}>
+          <ImagePlus className={`h-6 w-6 transition-colors ${dragOver ? 'text-primary' : 'text-muted-foreground'}`} />
+        </div>
+        <p className="text-sm font-medium">拖入图像 / PDF，或点击选择文件</p>
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          支持 PNG / JPG / WebP / PDF，也可以直接 Ctrl+V 粘贴剪切板图像
+        </p>
         <input
           ref={fileRef}
           type="file"
@@ -239,37 +248,45 @@ export default function ImportPage() {
         />
       </div>
 
-      <div className="mb-4 flex flex-wrap items-end gap-3">
+      {/* PDF 参数 + 文件夹导入 */}
+      <div className="mb-6 flex flex-wrap items-end gap-3">
         <div>
-          <Label htmlFor="pdf-range">PDF 页码范围（留空全部）</Label>
-          <Input id="pdf-range" value={pdfRange} onChange={(e) => setPdfRange(e.target.value)} placeholder="如 1-3,5" className="w-36" />
+          <Label htmlFor="pdf-range">PDF 页码范围</Label>
+          <Input
+            id="pdf-range"
+            value={pdfRange}
+            onChange={(e) => setPdfRange(e.target.value)}
+            placeholder="如 1-3,5（留空全部）"
+            className="w-36 rounded-xl"
+          />
         </div>
         <div>
-          <Label htmlFor="pdf-dpi">PDF 渲染 DPI</Label>
+          <Label htmlFor="pdf-dpi">渲染 DPI</Label>
           <Input
             id="pdf-dpi"
             type="number"
             value={pdfDpi}
             onChange={(e) => setPdfDpi(Math.max(72, parseInt(e.target.value, 10) || DEFAULT_DPI))}
-            className="w-24"
+            className="w-24 rounded-xl"
           />
         </div>
         {hasFSAccess() && (
-          <Button variant="outline" onClick={() => void handleFolder()} disabled={busy}>
+          <Button variant="outline" onClick={() => void handleFolder()} disabled={busy} className="rounded-xl">
             <FolderInput className="h-4 w-4" /> 从文件夹批量导入
           </Button>
         )}
         {busy && <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />}
         <div className="flex-1" />
-        <Button onClick={() => setView('analyze')} disabled={pages.length === 0}>
+        <Button onClick={() => setView('analyze')} disabled={pages.length === 0} className="rounded-xl">
           前往分析 →
         </Button>
       </div>
 
-      <h2 className="mb-2 text-sm font-medium">已导入页面（{pages.length}）</h2>
-      <ul className="mb-4 max-h-64 space-y-1 overflow-y-auto rounded-md border p-2">
+      {/* 已导入页面列表 */}
+      <h2 className="mb-3 text-sm font-medium">已导入页面（{pages.length}）</h2>
+      <ul className="mb-6 max-h-64 space-y-1 overflow-y-auto rounded-xl border bg-card p-2 card-shadow">
         {pages.map((p) => (
-          <li key={p.id} className="flex items-center gap-2 rounded px-2 py-1 text-sm hover:bg-accent">
+          <li key={p.id} className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-accent">
             <span className="w-8 text-muted-foreground">#{p.index + 1}</span>
             <button className="flex-1 truncate text-left" onClick={() => setCurrentPage(p.id)} title={p.source.name}>
               {p.source.name}
@@ -277,15 +294,18 @@ export default function ImportPage() {
             <span className="text-xs text-muted-foreground">
               {p.source.widthPx}×{p.source.heightPx}
             </span>
-            <Button size="sm" variant="ghost" onClick={() => void removePage(p.id)} aria-label="删除本页">
+            <Button size="sm" variant="ghost" onClick={() => void removePage(p.id)} aria-label="删除本页" className="rounded-lg text-destructive hover:bg-destructive/10">
               删除
             </Button>
           </li>
         ))}
       </ul>
 
+      {/* 操作日志 */}
       {log.length > 0 && (
-        <pre className="max-h-32 overflow-y-auto rounded-md bg-muted p-3 text-xs text-muted-foreground">{log.join('\n')}</pre>
+        <pre className="max-h-32 overflow-y-auto rounded-xl bg-muted/60 p-4 text-xs text-muted-foreground code-font">
+          {log.join('\n')}
+        </pre>
       )}
     </div>
   );

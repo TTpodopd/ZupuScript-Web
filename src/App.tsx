@@ -42,36 +42,57 @@ export default function App() {
 
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
-        <span className="mr-2 text-lg font-semibold">{APP_NAME}</span>
-        <nav className="flex gap-1" aria-label="主导航">
+      {/* 顶栏：宣纸底 + 柔和下边框 */}
+      <header className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-3 border-b bg-card/80 px-6 backdrop-blur-sm">
+        {/* 品牌：朱砂印章 + 名称 */}
+        <div className="mr-3 flex items-center gap-2.5">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground shadow-soft">
+            谱
+          </div>
+          <span className="text-lg font-semibold tracking-wide">{APP_NAME}</span>
+        </div>
+
+        {/* 导航：胶囊式切换 */}
+        <nav className="flex items-center gap-0.5 rounded-full bg-muted/60 p-1" aria-label="主导航">
           {NAV.map((n) => (
             <button
               key={n.id}
               onClick={() => setView(n.id)}
               className={cn(
-                'rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-accent',
-                view === n.id && 'bg-accent font-medium',
-                n.id !== 'projects' && !currentProjectId && 'opacity-40',
+                'rounded-full px-4 py-1.5 text-sm transition-all duration-200',
+                view === n.id
+                  ? 'bg-card font-medium text-foreground shadow-soft'
+                  : 'text-muted-foreground hover:text-foreground',
+                n.id !== 'projects' && !currentProjectId && 'pointer-events-none opacity-40',
               )}
             >
               {n.label}
             </button>
           ))}
         </nav>
-        {/* P1.2：常驻隐私模式徽号与已上行图片数 */}
-        <span className="ml-2 rounded bg-secondary px-2 py-0.5 text-xs text-secondary-foreground" title="当前隐私模式 / 本次会话已上行图片数">
-          模式 {forcedLocal ? 'A（已锁定）' : privacyMode} · 上行 {getSessionUploads()} 张
+
+        {/* 隐私徽号 */}
+        <span
+          className="ml-2 rounded-full border bg-secondary/50 px-2.5 py-1 text-xs text-secondary-foreground"
+          title="当前隐私模式 / 本次会话已上行图片数"
+        >
+          {forcedLocal ? 'A 锁定' : `模式 ${privacyMode}`} · 上行 {getSessionUploads()}
         </span>
+
         <div className="flex-1" />
-        <Button size="icon" variant="ghost" onClick={toggleDarkMode} aria-label="切换深浅色">
-          {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-        </Button>
-        <Button size="icon" variant="ghost" onClick={() => setSettingsOpen(true)} aria-label="设置">
-          <Settings className="h-4 w-4" />
-        </Button>
+
+        {/* 右侧操作 */}
+        <div className="flex items-center gap-1">
+          <Button size="icon" variant="ghost" onClick={toggleDarkMode} aria-label="切换深浅色" className="rounded-full">
+            {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+          </Button>
+          <Button size="icon" variant="ghost" onClick={() => setSettingsOpen(true)} aria-label="设置" className="rounded-full">
+            <Settings className="h-4 w-4" />
+          </Button>
+        </div>
       </header>
 
+      {/* 主内容区 */}
       <main className="min-h-0 flex-1">
         {view === 'projects' && <ProjectListPage />}
         {view === 'import' && <ImportPage />}

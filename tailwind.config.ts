@@ -23,8 +23,16 @@ export default {
       },
       borderRadius: {
         lg: 'var(--radius)',
-        md: 'calc(var(--radius) - 2px)',
-        sm: 'calc(var(--radius) - 4px)',
+        md: 'calc(var(--radius) - 4px)',
+        sm: 'calc(var(--radius) - 6px)',
+        xl: 'calc(var(--radius) + 4px)',
+        '2xl': 'calc(var(--radius) + 8px)',
+        '3xl': 'calc(var(--radius) + 12px)',
+      },
+      boxShadow: {
+        'soft': '0 1px 2px hsl(var(--foreground) / 0.04), 0 2px 8px hsl(var(--foreground) / 0.06)',
+        'soft-lg': '0 2px 4px hsl(var(--foreground) / 0.05), 0 8px 24px hsl(var(--foreground) / 0.08)',
+        'soft-xl': '0 4px 8px hsl(var(--foreground) / 0.06), 0 16px 48px hsl(var(--foreground) / 0.10)',
       },
     },
   },

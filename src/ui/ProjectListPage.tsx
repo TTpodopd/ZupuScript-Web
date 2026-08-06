@@ -38,7 +38,6 @@ export default function ProjectListPage() {
   }, [loaded, loadFromDB]);
 
   useEffect(() => {
-    // 统计每个项目的页数与完成度
     void (async () => {
       const stats: Record<string, { count: number; done: number }> = {};
       for (const p of projects) {
@@ -78,25 +77,30 @@ export default function ProjectListPage() {
   };
 
   return (
-    <div className="mx-auto max-w-3xl p-6">
-      <h1 className="mb-1 text-xl font-semibold">我的项目</h1>
-      <p className="mb-4 text-sm text-muted-foreground">
-        数据全程保存在本机浏览器（IndexedDB / OPFS），不会上传到任何服务器。
-        本地已用 {formatBytes(usage.usage)}{usage.quota > 0 ? ` / 配额 ${formatBytes(usage.quota)}` : ''}。
-      </p>
+    <div className="mx-auto max-w-3xl p-8">
+      {/* 页头 */}
+      <div className="mb-6">
+        <h1 className="text-2xl font-semibold tracking-wide">我的项目</h1>
+        <p className="mt-1.5 text-sm text-muted-foreground">
+          数据全程保存在本机浏览器，不会上传到任何服务器。
+          本地已用 {formatBytes(usage.usage)}{usage.quota > 0 ? ` / ${formatBytes(usage.quota)}` : ''}。
+        </p>
+      </div>
 
-      <div className="mb-6 flex gap-2">
+      {/* 新建项目 */}
+      <div className="mb-8 flex gap-2.5">
         <Input
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           placeholder="新项目名称，如：倪氏族谱 卷三"
           onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
           aria-label="新项目名称"
+          className="rounded-xl"
         />
-        <Button onClick={handleCreate} className="shrink-0">
+        <Button onClick={handleCreate} className="shrink-0 rounded-xl">
           <Plus className="h-4 w-4" /> 新建项目
         </Button>
-        <Button variant="outline" className="shrink-0" onClick={() => fileRef.current?.click()}>
+        <Button variant="outline" className="shrink-0 rounded-xl" onClick={() => fileRef.current?.click()}>
           <Upload className="h-4 w-4" /> 导入 .zpproj
         </Button>
         <input
@@ -112,59 +116,87 @@ export default function ProjectListPage() {
         />
       </div>
 
+      {/* 空状态 */}
       {projects.length === 0 && (
-        <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">
-          还没有项目。新建一个，或导入 .zpproj.json 继续之前的工作。
+        <div className="rounded-2xl border border-dashed p-16 text-center">
+          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-muted/60">
+            <FolderOpen className="h-7 w-7 text-muted-foreground" />
+          </div>
+          <p className="text-sm text-muted-foreground">
+            还没有项目。新建一个，或导入 .zpproj.json 继续之前的工作。
+          </p>
         </div>
       )}
 
-      <ul className="space-y-2">
+      {/* 项目卡片列表 */}
+      <ul className="space-y-3">
         {projects.map((p) => {
           const stat = pageStats[p.id];
           const pct = stat && stat.count > 0 ? Math.round((stat.done / stat.count) * 100) : 0;
           return (
-            <li key={p.id} className="flex items-center gap-3 rounded-lg border bg-card p-4">
+            <li
+              key={p.id}
+              className="group flex items-center gap-4 rounded-2xl border bg-card p-5 card-shadow transition-all duration-200 hover:card-shadow-lg"
+            >
+              {/* 项目图标 */}
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-lg font-bold text-primary">
+                {p.name.charAt(0)}
+              </div>
+
+              {/* 信息区 */}
               <div className="min-w-0 flex-1">
                 <div className="truncate font-medium">{p.name}</div>
-                <div className="text-xs text-muted-foreground">
-                  {stat?.count ?? p.pageIds.length} 页 · 完成度 {pct}% · 更新于 {formatTime(p.updatedAt)}
+                <div className="mt-0.5 text-xs text-muted-foreground">
+                  {stat?.count ?? p.pageIds.length} 页 · 完成度 {pct}% · {formatTime(p.updatedAt)}
                 </div>
                 {stat && stat.count > 0 && (
-                  <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-secondary">
-                    <div className="h-full bg-primary" style={{ width: `${pct}%` }} />
+                  <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-primary transition-all duration-500"
+                      style={{ width: `${pct}%` }}
+                    />
                   </div>
                 )}
               </div>
-              <Button
-                size="sm"
-                onClick={() => {
-                  void openProject(p.id).then(() => setView('import'));
-                }}
-              >
-                <FolderOpen className="h-4 w-4" /> 打开
-              </Button>
-              <Button size="sm" variant="outline" onClick={() => void handleExportZpproj(p.id, p.name)}>
-                <Download className="h-4 w-4" /> 导出
-              </Button>
-              <Button
-                size="sm"
-                variant="destructive"
-                onClick={() => {
-                  if (confirm(`确定删除项目「${p.name}」？页面数据与本地图像将一并删除。`)) {
-                    void removeProject(p.id);
-                  }
-                }}
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
+
+              {/* 操作区 */}
+              <div className="flex items-center gap-1.5">
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    void openProject(p.id).then(() => setView('import'));
+                  }}
+                  className="rounded-lg"
+                >
+                  <FolderOpen className="h-4 w-4" /> 打开
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => void handleExportZpproj(p.id, p.name)} className="rounded-lg">
+                  <Download className="h-4 w-4" /> 导出
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    if (confirm(`确定删除项目「${p.name}」？页面数据与本地图像将一并删除。`)) {
+                      void removeProject(p.id);
+                    }
+                  }}
+                  className="rounded-lg text-destructive hover:bg-destructive/10 hover:text-destructive"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
             </li>
           );
         })}
       </ul>
 
-      <p className="mt-6 text-xs text-muted-foreground">
-        页面状态流程：{STATUS_ORDER.map(statusLabel).join(' → ')}
-      </p>
+      {/* 状态流程 */}
+      <div className="mt-8 rounded-xl bg-muted/40 p-4">
+        <p className="text-xs text-muted-foreground">
+          页面状态流程：{STATUS_ORDER.map(statusLabel).join(' → ')}
+        </p>
+      </div>
     </div>
   );
 }
