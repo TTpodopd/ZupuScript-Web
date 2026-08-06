@@ -61,12 +61,12 @@ check('清页逻辑遍历删除旧对象', code.includes('getAllObjects()') && c
 check('三层字体解析 resolve_font', code.includes('def resolve_font():'));
 check('第一层 FORCE_FONT 精确指定', code.includes('if FORCE_FONT:'));
 check('第二层 PREFERRED_FONTS 名单匹配', code.includes('for want in PREFERRED_FONTS:'));
-check('第三层关键词模糊匹配', code.includes('keywords = [') && code.includes('notoserifcjk'));
-check('字体全部失败时中止（不静默出豆腐块）', code.includes('raise Exception("no CJK font available")'));
+check('第三层关键词模糊匹配', code.includes('FUZZY_KEYS') && code.includes('notoserifcjk'));
+check('字体全部失败时中止（不静默出豆腐块）', code.includes('未找到任何可用中文字体') && code.includes('ICON_CRITICAL'));
 // 统计绘制函数内的调用行（前导空格缩进），排除 def 定义行
-const applyFontCalls = code.match(/^ +apply_font\(item, font, size_pt\)/gm) ?? [];
+const applyFontCalls = code.match(/^ +apply_font\(item, font\)/gm) ?? [];
 eq('setFont 三次应用（建空框/写字后/selectText 全选后）', applyFontCalls.length, 3);
-check('selectText 全选后再应用字体', code.includes('scribus.selectText(item, 0, -1)'));
+check('selectText 全选后再应用字体', code.includes('scribus.selectText(0, length, item)'));
 check('getFont 反查实际生效字体', code.includes('scribus.getFont(first_item)'));
 check('newDoc 未被调用（1.6.6 无法脚本化新建文档；注释提及不算调用）', !code.includes('scribus.newDoc('));
 
@@ -76,7 +76,7 @@ check(`MM_PER_PT = ${MM_PER_PT} 写入配置区`, code.includes(`MM_PER_PT = ${M
 check('按中心定位文本框', code.includes('x = mm(cx) - box_mm / 2.0'));
 
 // 线宽换算 px → pt
-check('线宽 px→pt 换算（×2.834645669）', code.includes('return w_px / PX_PER_MM * 2.834645669'));
+check('线宽 px→pt 换算（×2.834645669）', code.includes('return float(px) / PX_PER_MM * 2.834645669'));
 
 // 无 BOM、LF 换行
 check('脚本无 BOM', code.charCodeAt(0) !== 0xfeff);
