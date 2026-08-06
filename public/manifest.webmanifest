@@ -1,0 +1,19 @@
+{
+  "name": "ZupuScript Web · 族谱图像转 Scribus 脚本工具",
+  "short_name": "ZupuScript",
+  "description": "打开网页即用的族谱数字化工具：版面分析、大模型识别、校对、导出 Scribus 脚本。数据全程留在本地。",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#fafaf9",
+  "theme_color": "#1c1917",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231c1917'/%3E%3Ctext x='16' y='23' font-size='18' text-anchor='middle' fill='%23fafaf9' font-family='serif'%3E谱%3C/text%3E%3C/svg%3E",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

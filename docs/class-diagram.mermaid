@@ -1,0 +1,101 @@
+classDiagram
+  class Project {
+    +string id
+    +string name
+    +number createdAt
+    +number updatedAt
+    +string[] pageIds
+  }
+  class Page {
+    +string id
+    +number index
+    +PageStatus status
+    +SourceInfo source
+    +Calibration calibration
+    +FontSizes fontSizes
+    +BorderRect[] borderRects
+    +TagRect[] tagRects
+    +TreeLine[] treeLines
+    +TreeNode[] treeNodes
+    +CharItem[] chars
+    +ArtifactStroke[] artifacts
+    +RecognitionMeta? recognition
+    +string imageKey
+  }
+  class CharItem {
+    +string id
+    +string|null text
+    +number cx
+    +number cy
+    +bbox x1,y1,x2,y2
+    +number pt
+    +number conf
+    +CharNote note
+    +CharSource source
+    +boolean edited
+    +FontGroup group
+    +CharKind kind
+  }
+  class BorderRect { +string id  +number x +number y +number w +number h }
+  class TagRect { +string id  +number x +number y +number w +number h }
+  class TreeLine { +string id  +number x1 +number y1 +number x2 +number y2 +number widthPx +Orientation orientation }
+  class TreeNode { +string id  +number cx +number cy +number r +number strokePx }
+  class ArtifactStroke { +string id  +number x1 +number y1 +number x2 +number y2 +number widthPx }
+  class Calibration { +number pxPerMm  +pageMm w,h  +number deskewDeg }
+  class FontSizes { +number body +number title +number pageno +number rank }
+
+  class LLMProvider {
+    <<interface>>
+    +ProviderId id
+    +string label
+    +boolean needsKey
+    +string defaultEndpoint
+    +string defaultModel
+    +recognize(req, cfg) Promise~RecognizeBatchResult~
+    +estimateCost(charCount) number
+  }
+  class GeminiProvider
+  class OpenAIProvider
+  class AnthropicProvider
+  class CustomProvider
+  class LocalTesseractProvider
+
+  class PipelineAPI {
+    <<Comlink Worker>>
+    +preprocess(img, opts, onProgress) PreprocessResult
+    +analyze(bin, opts, onProgress) LayoutResult
+    +segment(bin, lines, opts) CharItem[]
+  }
+  class RecognizeOrchestrator {
+    +recognizePage(page, provider, cfg, mode, onProgress) CharItem[]
+    -validateBatch(items, expect)
+    -downgradeToLocal(page)
+  }
+  class ScriptGenerator {
+    +generate(page, opts) GeneratedScript
+    +lint(code) LintIssue[]
+  }
+  class EditorStore {
+    +undoStack EditCommand[]
+    +redoStack EditCommand[]
+    +apply(cmd) / undo() / redo()
+  }
+
+  Project "1" --> "*" Page
+  Page "1" --> "*" CharItem
+  Page "1" --> "*" BorderRect
+  Page "1" --> "*" TagRect
+  Page "1" --> "*" TreeLine
+  Page "1" --> "*" TreeNode
+  Page "1" --> "*" ArtifactStroke
+  Page "1" --> "1" Calibration
+  Page "1" --> "1" FontSizes
+  LLMProvider <|.. GeminiProvider
+  LLMProvider <|.. OpenAIProvider
+  LLMProvider <|.. AnthropicProvider
+  LLMProvider <|.. CustomProvider
+  LLMProvider <|.. LocalTesseractProvider
+  RecognizeOrchestrator --> LLMProvider : 按 mode 调用
+  RecognizeOrchestrator --> PipelineAPI : 取拼图/分割结果
+  ScriptGenerator --> Page : 读取
+  EditorStore --> Page : 命令修改 chars/图元

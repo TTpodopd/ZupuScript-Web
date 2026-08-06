@@ -1,0 +1,90 @@
+/**
+ * 本地兜底识别（F4.11）：Tesseract.js chi_tra，经 Comlink 隔离在 ocr.worker。
+ * 结果全部 conf=0 标红待人工（共享约定：降级链末端）。
+ * 无密钥也能跑完全流程；图像不出本机。
+ */
+import * as Comlink from 'comlink';
+import { cropBinary } from '@/imaging/raster';
+import type { CharItem } from '@/model/types';
+import { arrayBufferToBase64 } from '@/lib/utils';
+
+export interface OcrWorkerAPI {
+  ocrChars(items: Array<{ key: string; dataUrl: string }>): Promise<Array<{ key: string; text: string | null }>>;
+  terminate(): Promise<void>;
+}
+
+let workerInstance: Worker | null = null;
+let workerApi: Comlink.Remote<OcrWorkerAPI> | null = null;
+
+function getWorker(): Comlink.Remote<OcrWorkerAPI> {
+  if (!workerApi) {
+    workerInstance = new Worker(new URL('../../workers/ocr.worker.ts', import.meta.url), { type: 'module' });
+    workerApi = Comlink.wrap<OcrWorkerAPI>(workerInstance);
+  }
+  return workerApi;
+}
+
+/** 把单字二值裁剪编码为 64×64 白底 PNG dataURL（与拼图同规格，提升 Tesseract 单字命中率） */
+async function charCropToDataUrl(
+  bin: Uint8Array,
+  pageWidth: number,
+  pageHeight: number,
+  bbox: [number, number, number, number],
+): Promise<string> {
+  const pad = 4;
+  const crop = cropBinary(bin, pageWidth, pageHeight, bbox[0] - pad, bbox[1] - pad, bbox[2] - bbox[0] + pad * 2, bbox[3] - bbox[1] + pad * 2);
+  const size = 64;
+  const canvas = new OffscreenCanvas(size, size);
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, size, size);
+  if (crop.width > 0 && crop.height > 0) {
+    const scale = Math.min((size - 12) / crop.width, (size - 12) / crop.height, 4);
+    const dw = Math.max(1, Math.round(crop.width * scale));
+    const dh = Math.max(1, Math.round(crop.height * scale));
+    const img = ctx.createImageData(dw, dh);
+    for (let y = 0; y < dh; y++) {
+      for (let x = 0; x < dw; x++) {
+        const sx = Math.min(crop.width - 1, Math.floor(x / scale));
+        const sy = Math.min(crop.height - 1, Math.floor(y / scale));
+        const v = crop.data[sy * crop.width + sx] ? 0 : 255;
+        const o = (y * dw + x) * 4;
+        img.data[o] = v;
+        img.data[o + 1] = v;
+        img.data[o + 2] = v;
+        img.data[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, Math.round((size - dw) / 2), Math.round((size - dh) / 2));
+  }
+  const blob = await canvas.convertToBlob({ type: 'image/png' });
+  const b64 = arrayBufferToBase64(await blob.arrayBuffer());
+  return `data:image/png;base64,${b64}`;
+}
+
+/**
+ * 本地识别一批字符。返回 charId → 识别文本（全部视为低置信，由调用方置 conf=0）。
+ */
+export async function localOcrChars(
+  chars: CharItem[],
+  bin: Uint8Array,
+  pageWidth: number,
+  pageHeight: number,
+): Promise<Map<string, string | null>> {
+  const items = await Promise.all(
+    chars.map(async (c) => ({ key: c.id, dataUrl: await charCropToDataUrl(bin, pageWidth, pageHeight, c.bbox) })),
+  );
+  const api = getWorker();
+  const results = await api.ocrChars(items);
+  return new Map(results.map((r) => [r.key, r.text]));
+}
+
+/** 释放本地 OCR 资源（WASM 体积大，不用时及时释放） */
+export async function shutdownLocalOcr(): Promise<void> {
+  if (workerApi) {
+    await workerApi.terminate().catch(() => undefined);
+  }
+  workerInstance?.terminate();
+  workerInstance = null;
+  workerApi = null;
+}

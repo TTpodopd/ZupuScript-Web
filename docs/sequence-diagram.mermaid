@@ -1,0 +1,48 @@
+sequenceDiagram
+  autonumber
+  actor U as 用户
+  participant UI as UI(React页面)
+  participant ST as Store(Zustand)
+  participant DB as Storage(idb/OPFS)
+  participant WK as PipelineWorker
+  participant RC as RecognizeOrchestrator
+  participant PV as LLMProvider(大模型)
+  participant GEN as ScriptGenerator
+
+  U->>UI: 拖入图片/PDF/粘贴
+  UI->>DB: 原图写入 OPFS(imageKey)
+  UI->>ST: 创建 Project + Page(status=imported)
+  ST->>DB: 项目元数据持久化(idb)
+
+  U->>UI: 设置预处理参数并运行
+  UI->>WK: preprocess(imageData, opts, proxy(cb))
+  WK-->>UI: 进度回报(deskew/binarize/denoise)
+  WK-->>ST: PreprocessResult(deskewDeg, pxPerMm, binary)
+  ST->>DB: 二值图存 OPFS, calibration 锁定
+
+  UI->>WK: analyze(binary) → segment(binary, lines)
+  WK-->>ST: 外框/连线/节点/装饰块/破损 + CharItem[](text=null)
+  ST->>DB: 图元与字符表持久化(status=analyzed)
+
+  alt 模式 B（默认）/ C
+    U->>UI: 确认隐私同意 + 预览上行拼图
+    UI->>RC: recognizePage(page, provider, cfg, mode)
+    RC->>RC: grid.ts 拼图分批(≤100字, 编号打乱) / 哈希缓存命中跳过
+    loop 每批（并发≤5, 失败指数退避≤3次）
+      RC->>PV: recognize(batch, cfg)
+      PV-->>RC: RecognizeBatchResult(JSON Schema)
+      RC->>RC: 校验(数量守恒/单字符/置信度)→失败批降级本地Tesseract
+    end
+    RC-->>ST: 写回 CharItem.text/conf/note(status=recognized)
+    RC->>DB: 审计日志(时间/模式/字符数/域名)
+  else 模式 A 全本地
+    UI->>WK: ocr.worker Tesseract chi_tra（结果全部标红待人工）
+  end
+
+  UI->>UI: calibrate.ts：字高中位数→pt、聚类分组、px→mm、线宽换算
+  U->>UI: Canvas 校对(改字/挪位/增删/低置信面板/撤销重做)
+  UI->>ST: apply(EditCommand) → 同步 idb 撤销栈
+  UI->>GEN: generate(page, opts)
+  GEN->>GEN: emit 数据区 + template 七段结构 + lint 自检
+  GEN-->>U: 预览面板微调 → 下载 .py+.txt / zip / FSAccess 写目录
+  Note over U,GEN: P1: verify/report.ts 生成叠加比对图与 IoU HTML 报告
