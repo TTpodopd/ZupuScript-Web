@@ -1,0 +1,12 @@
+name = "zupuscript-cors-proxy"
+main = "worker.js"
+compatibility_date = "2024-12-01"
+
+# 部署后 URL 形如：
+# https://zupuscript-cors-proxy.<你的子域>.workers.dev
+#
+# 在 ZupuScript 设置面板「可选代理 URL」填入上面的 URL 即可。
+
+# 如需限制来源（防止被他人滥用），取消注释并填你的站点域名：
+# [vars]
+# ALLOWED_ORIGINS = "https://your-site.com"
