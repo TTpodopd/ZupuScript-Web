@@ -17,7 +17,10 @@ import { TOKENS_PER_CHAR } from '@/lib/constants';
 
 /** 预置端点模板（设置界面下拉） */
 export const ENDPOINT_PRESETS: Array<{ label: string; endpoint: string; model: string }> = [
-  { label: '阿里百炼（通义千问）', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode', model: 'qwen-vl-max' },
+  // 国际版 dashscope（兼容性更好，但需国际账号）
+  { label: '阿里百炼国际版（通义千问）', endpoint: 'https://dashscope-intl.aliyuncs.com/compatible-mode', model: 'qwen-vl-max' },
+  // 国内版 maas 新版兼容模式
+  { label: '阿里百炼 token-plan（通义千问）', endpoint: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode', model: 'qwen-vl-max' },
   { label: '智谱 GLM', endpoint: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4v-flash' },
   { label: 'DeepSeek', endpoint: 'https://api.deepseek.com', model: 'deepseek-chat' },
   { label: 'Ollama 本地（隐私最佳）', endpoint: 'http://localhost:11434', model: 'qwen2.5vl:7b' },
@@ -37,8 +40,10 @@ async function callCompatible(
   signal: AbortSignal,
   charCount: number,
 ): Promise<{ json: unknown; usage?: { promptTokens: number; completionTokens: number } }> {
-  const base = (cfg.proxyUrl || cfg.endpoint || '').replace(/\/$/, '');
+  let base = (cfg.proxyUrl || cfg.endpoint || '').replace(/\/$/, '');
   if (!base) throw new Error('自定义端点未配置 endpoint');
+  // 兼容用户输入 "https://host/v1" 或 "https://host/compatible-mode/v1"：去掉末尾 /v1 再统一拼接
+  base = base.replace(/\/v1$/, '');
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
   const maxTokens = Math.max(2048, charCount * TOKENS_PER_CHAR);
@@ -59,12 +64,28 @@ async function callCompatible(
   };
   // 兼容端点对 json_schema 支持不一：优先 response_format json_object + 提示词约束
   body.response_format = { type: 'json_object' };
-  const res = await fetch(`${base}/v1/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    signal,
-  });
+  const url = `${base}/v1/chat/completions`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (err) {
+    // NetworkError = CORS 预检失败 / DNS 失败 / 网络断开
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/NetworkError|Failed to fetch|TypeError/i.test(msg)) {
+      throw new Error(
+        `网络请求失败（${msg}）。通常是浏览器 CORS 预检拦截：\n` +
+        `  1) 该端点可能不允许浏览器直连 → 在「可选代理 URL」填入你自己的 CORS 代理\n` +
+        `  2) 或换用支持 CORS 的端点（如百炼国际版 dashscope-intl、海外厂商）\n` +
+        `  3) 或在本机起 CORS 代理（Node: npx local-cors-proxy）转发到 ${base}`,
+      );
+    }
+    throw new Error(`端点请求异常：${msg}`);
+  }
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
     throw new Error(`端点请求失败 HTTP ${res.status}：${detail.slice(0, 200)}（若 CORS 报错请配置代理 URL）`);
