@@ -51,9 +51,7 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    // tesseract.js 是纯 CommonJS（顶部 require('regenerator-runtime/runtime')），必须纳入预打包
-    // 让 Vite 转成 ESM 兼容代码后才能在浏览器 Worker 中 dynamic import
-    include: ['tesseract.js'],
+    // tesseract.js 由 ocr.worker.ts 静态 import，整个包打进 worker bundle（不进首屏预缓存）
     // OpenCV.js / opencc-js 为可选懒加载增强（OpenCV 10MB+、opencc 全量字典），不进预缓存也不预打包
     exclude: ['@techstark/opencv-js', 'opencc-js'],
   },

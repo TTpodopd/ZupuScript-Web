@@ -2,8 +2,13 @@
  * 本地 OCR Worker：Tesseract.js（chi_tra + chi_tra_vert 双引擎投票）隔离加载。
  * 族谱竖排用 vert 引擎，横排用 chi_tra；双引擎一致才提置信度。
  * 仅作为模式 A 与云端失败降级链的兜底，结果一律由调用方标 conf=0。
+ *
+ * tesseract.js 必须在 worker 顶部静态 import，让 Vite 把整个 Tesseract.js
+ * 打进 worker bundle，避免 Worker dynamic import /node_modules/.vite/deps/ 时
+ * 跨域/路径解析失败（"error loading dynamically imported module"）。
  */
 import * as Comlink from 'comlink';
+import { createWorker } from 'tesseract.js';
 import type { OcrWorkerAPI } from '@/recognize/local/tesseract';
 import { ALL_DICT_CHARS } from '@/recognize/dict/genealogy';
 
@@ -21,7 +26,6 @@ const WHITELIST = [...ALL_DICT_CHARS].join('');
 
 async function getTesseractNormal(): Promise<TesseractWorker> {
   if (!tessNormal) {
-    const { createWorker } = await import('tesseract.js');
     const w = (await createWorker('chi_tra', 1)) as unknown as TesseractWorker;
     await w.setParameters({
       tessedit_pageseg_mode: '10', // PSM_SINGLE_CHAR
@@ -35,7 +39,6 @@ async function getTesseractNormal(): Promise<TesseractWorker> {
 
 async function getTesseractVert(): Promise<TesseractWorker> {
   if (!tessVert) {
-    const { createWorker } = await import('tesseract.js');
     const w = (await createWorker('chi_tra_vert', 1)) as unknown as TesseractWorker;
     await w.setParameters({
       tessedit_pageseg_mode: '10',
