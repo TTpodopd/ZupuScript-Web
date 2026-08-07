@@ -20,18 +20,19 @@ export const TEXT_BOX_SCALE = 2.0;
 /* ---------- 识别 ---------- */
 /** 置信度阈值，低于即标红进低置信面板（F4.6） */
 export const CONFIDENCE_THRESHOLD = 0.85;
-/** B 模式每批最多字符数（F4.4） */
-export const GRID_BATCH_SIZE = 100;
-/** 拼图网格列数（10×10） */
-export const GRID_COLS = 10;
-/** 单字小图归一尺寸（木刻版繁体笔画密、断笔多，128×128 保笔画完整） */
-export const GRID_CELL_PX = 128;
+/** B 模式每批最多字符数（F4.4）。
+ * 由 100 调到 64：木刻版单字细节多，64 字/8×8 网格每字可分配像素翻倍，模型才能看清 */
+export const GRID_BATCH_SIZE = 64;
+/** 拼图网格列数（8×8 容纳 64 字） */
+export const GRID_COLS = 8;
+/** 单字小图归一尺寸（木刻版繁体笔画密、断笔多，192×192 给模型 50% 以上余裕） */
+export const GRID_CELL_PX = 192;
 /** 拼图单元格内字符绘制区边距（编号占位 + 四周留白） */
-export const GRID_CELL_PAD = 16;
+export const GRID_CELL_PAD = 20;
 /** 二值裁剪后形态学闭运算核半径（像素，修木刻断笔；0 = 关闭） */
 export const GRID_CLOSE_RADIUS = 1;
 /** 拼图编号字体（像素，单元格放大后同步加大以便模型读号） */
-export const GRID_LABEL_FONT_PX = 14;
+export const GRID_LABEL_FONT_PX = 16;
 /** 大模型并发上限（F4.2 / F11.4） */
 export const MAX_CONCURRENCY = 5;
 export const DEFAULT_TIMEOUT_MS = 60_000;

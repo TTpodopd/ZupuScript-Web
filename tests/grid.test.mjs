@@ -26,8 +26,8 @@ const { GRID_BATCH_SIZE, GRID_COLS } = await import('../src/lib/constants.ts');
 const { check, eq, section, summary } = await import('./helpers.mjs');
 
 section('常量契约');
-eq('每批上限 100', GRID_BATCH_SIZE, 100);
-eq('网格列数 10', GRID_COLS, 10);
+eq('每批上限 64', GRID_BATCH_SIZE, 64);
+eq('网格列数 8', GRID_COLS, 8);
 
 const mkChars = (n) => Array.from({ length: n }, (_, i) => ({
   id: `c${i}`, text: null, cx: 100 + i, cy: 100, bbox: [100 + i * 20, 100, 118 + i * 20, 140],
@@ -61,17 +61,17 @@ for (let t = 0; t < 5; t++) {
 }
 check('编号确实被打乱（5 次内至少 1 次非顺序）', sawShuffled);
 
-section('分批：250 字 → 3 批，每批 ≤100');
+section('分批：250 字 → 4 批，每批 ≤64');
 const all = mkChars(250);
 const batches = await buildAllGrids(all, bin, W, H);
-eq('250 字分 3 批', batches.length, 3);
-check('每批 ≤100', batches.every((b) => b.ids.length <= GRID_BATCH_SIZE));
-eq('各批 100/100/50', batches.map((b) => b.ids.length).join(','), '100,100,50');
+eq('250 字分 4 批', batches.length, 4);
+check('每批 ≤64', batches.every((b) => b.ids.length <= GRID_BATCH_SIZE));
+eq('各批 64/64/64/58', batches.map((b) => b.ids.length).join(','), '64,64,64,58');
 check('批内 ids 仍是合法置换', batches.every((b) => {
   const s = [...b.ids].sort((x, y) => x - y);
   return s.every((v, i) => v === i);
 }));
-eq('batchIndex 递增', batches.map((b) => b.batchIndex).join(','), '0,1,2');
+eq('batchIndex 递增', batches.map((b) => b.batchIndex).join(','), '0,1,2,3');
 
 section('批哈希（缓存键）');
 eq('同批同参哈希稳定', hashBatch(chars, 0), hashBatch(chars, 0));
