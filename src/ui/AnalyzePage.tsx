@@ -27,6 +27,12 @@ import { grantConsent, hasConsented } from '@/privacy/consent';
 
 function createPipeline(): { worker: Worker; api: Comlink.Remote<PipelineAPI> } {
   const worker = new Worker(new URL('../workers/pipeline.worker.ts', import.meta.url), { type: 'module' });
+  worker.addEventListener('error', (event) => {
+    console.error('[pipeline-worker]', event.message || event);
+  });
+  worker.addEventListener('messageerror', (event) => {
+    console.error('[pipeline-worker messageerror]', event);
+  });
   return { worker, api: Comlink.wrap<PipelineAPI>(worker) };
 }
 
@@ -127,7 +133,8 @@ export default function AnalyzePage() {
         targetDpi: isPdfSource ? target.source.dpi : 254,
         sourceDpi: isPdfSource ? target.source.dpi : undefined,
         binarizer: 'sauvola',
-        useOpenCV: true,
+        // 禁用 Worker 内 OpenCV 懒加载：10MB WASM 在部分静态托管/CDN 环境会永久挂起（进度卡在 ~11%）
+        useOpenCV: false,
         strokeDilate: isPdfSource ? PDF_STROKE_DILATE_RADIUS : 0,
       },
       Comlink.proxy((p: ProgressInfo) => setProgress(p)),

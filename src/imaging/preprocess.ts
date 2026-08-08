@@ -278,9 +278,11 @@ export async function preprocessPipeline(
   if (opts.manualDeskewDeg !== undefined && Math.abs(opts.manualDeskewDeg) > 1e-6) {
     deskewDeg = opts.manualDeskewDeg;
   } else if (opts.useOpenCV) {
-    // OpenCV 增强（可选）：失败回退投影法
-    const { estimateSkewWithOpenCV } = await import('./opencv');
-    const cvDeg = await estimateSkewWithOpenCV(binary, width, height).catch(() => null);
+    // OpenCV 增强（可选）：失败或超时回退投影法
+    const cvDeg = await Promise.race([
+      import('./opencv').then(({ estimateSkewWithOpenCV }) => estimateSkewWithOpenCV(binary, width, height)),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 18_000)),
+    ]).catch(() => null);
     deskewDeg = cvDeg ?? estimateSkewDeg(binary, width, height);
   } else {
     deskewDeg = estimateSkewDeg(binary, width, height);

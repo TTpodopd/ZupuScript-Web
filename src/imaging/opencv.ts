@@ -19,28 +19,38 @@ interface CvRuntime {
 
 let cvPromise: Promise<CvRuntime | null> | null = null;
 
-/** 懒加载 OpenCV.js；加载失败返回 null（调用方回退纯 JS） */
+const OPENCV_INIT_TIMEOUT_MS = 15_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  return Promise.race([
+    promise,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
+  ]);
+}
+
+/** 懒加载 OpenCV.js；加载失败或超时返回 null（调用方回退纯 JS） */
 export function loadOpenCV(): Promise<CvRuntime | null> {
   if (!cvPromise) {
     cvPromise = (async () => {
       try {
         const mod = (await import('@techstark/opencv-js')) as { default?: unknown } & Record<string, unknown>;
         const cv = (mod.default ?? mod) as CvRuntime & { onRuntimeInitialized?: () => void; then?: unknown };
-        // @techstark/opencv-js 的 WASM 运行时为异步初始化：模块本身是 thenable
         if (typeof cv.then === 'function') {
-          const ready = (await cv) as CvRuntime;
+          const ready = await withTimeout(
+            Promise.resolve(cv as unknown as PromiseLike<CvRuntime>),
+            OPENCV_INIT_TIMEOUT_MS,
+          );
           return ready;
         }
-        // 等待 onRuntimeInitialized 回调
         return await new Promise<CvRuntime | null>((resolve) => {
-          const timer = setTimeout(() => resolve(null), 20_000);
+          const timer = setTimeout(() => resolve(null), OPENCV_INIT_TIMEOUT_MS);
           cv.onRuntimeInitialized = () => {
             clearTimeout(timer);
             resolve(cv);
           };
         });
       } catch {
-        return null; // 网络失败 / WASM 不可用 → 回退纯 JS
+        return null;
       }
     })();
   }
