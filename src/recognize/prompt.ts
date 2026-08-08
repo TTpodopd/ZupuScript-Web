@@ -15,7 +15,121 @@ const SURNAMES_TOP100 = SURNAMES.slice(0, 100).join('、');
 const GENEALOGY_PRIOR = GENEALOGY_TERMS.slice(0, 80).join('、');
 
 /** 修改提示词或识别规则时升级，防止复用旧模型缓存。 */
-export const RECOGNITION_PROMPT_VERSION = 'genealogy-ocr-v4';
+export const RECOGNITION_PROMPT_VERSION = 'genealogy-ocr-v5';
+export const LAYOUT_BORDER_PROMPT_VERSION = 'border-layout-v1';
+
+export const LAYOUT_BORDER_SYSTEM_PROMPT = [
+  '你是族谱、家谱扫描件版面分析专家，专精识别外框实心黑条、装饰黑块与谱系结构线。',
+  '你的任务是输出边框定位与检测规则文档，供本地程序二次精确化；不是 OCR 文字。',
+  '',
+  '【必须识别】',
+  '- 包裹正文区域的四边实心外框（常见为较粗黑色矩形框，扫描件可能内缩于白边）',
+  '- 页内横向/竖向实心装饰条（如卷次标题黑底）',
+  '',
+  '【必须排除】',
+  '- 谱系细横线/竖线（仅 1–3px 的连接线）',
+  '- 圆形节点、文字笔画、页边空白、扫描噪声',
+  '- 竖排/横排正文、书名、页码、人名等文字列（tagBlocks 与 excludeZones 中标记，绝不当作装饰黑块）',
+  '',
+  'tagBlocks 仅用于少量实心装饰图形（如书标折角、侧边图标），不得覆盖含多个汉字的区域。',
+  '',
+  '坐标一律使用相对值 0–1（左上角为原点）。只输出 JSON，禁止解释。',
+].join('\n');
+
+export function buildLayoutBorderUserPrompt(
+  widthPx: number,
+  heightPx: number,
+  localDraft?: { borderRects: Array<{ x: number; y: number; w: number; h: number }>; tagRects: Array<{ x: number; y: number; w: number; h: number }> },
+): string {
+  const parts = [
+    `附件为 ${widthPx}×${heightPx}px 的族谱页二值图（白底黑墨）。请输出边框定位与检测规则。`,
+    '重点找出包裹谱系图的正文外框四条实心边条；每条给出 side、role=frame、归一化 bbox 与 confidence。',
+    'rules 数组写出 3–6 条本地检测建议，例如：外框线宽约 N px、距页边内缩比例、哪些区域是空白页边等。',
+    'excludeZones 标出空白页边或竖排正文列，避免误检为边框。',
+  ];
+  if (localDraft && (localDraft.borderRects.length > 0 || localDraft.tagRects.length > 0)) {
+    parts.push(
+      '下面是本地 CV 初稿（可能漏检或误检），请对照原图修正：',
+      JSON.stringify({
+        local_border_rects_px: localDraft.borderRects.map((r) => [r.x, r.y, r.w, r.h]),
+        local_tag_rects_px: localDraft.tagRects.map((r) => [r.x, r.y, r.w, r.h]),
+      }),
+    );
+  }
+  parts.push('输出完整 JSON。');
+  return parts.join('\n');
+}
+
+export const LAYOUT_BORDER_RESPONSE_SCHEMA = {
+  type: 'object',
+  required: ['confidence', 'summary', 'rules', 'frame', 'borderBars', 'tagBlocks', 'excludeZones'],
+  properties: {
+    confidence: { type: 'number', minimum: 0, maximum: 1 },
+    summary: { type: 'string' },
+    rules: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8 },
+    frame: {
+      type: 'object',
+      required: ['hasOuterFrame'],
+      properties: {
+        hasOuterFrame: { type: 'boolean' },
+        inset: {
+          type: 'object',
+          properties: {
+            top: { type: 'number', minimum: 0, maximum: 0.5 },
+            right: { type: 'number', minimum: 0, maximum: 0.5 },
+            bottom: { type: 'number', minimum: 0, maximum: 0.5 },
+            left: { type: 'number', minimum: 0, maximum: 0.5 },
+          },
+        },
+        thicknessPx: { type: 'number', minimum: 1, maximum: 500 },
+      },
+    },
+    borderBars: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['role', 'x', 'y', 'w', 'h', 'confidence'],
+        properties: {
+          role: { type: 'string', enum: ['frame', 'divider', 'decoration'] },
+          side: { type: 'string', enum: ['top', 'bottom', 'left', 'right'] },
+          x: { type: 'number', minimum: 0, maximum: 1 },
+          y: { type: 'number', minimum: 0, maximum: 1 },
+          w: { type: 'number', minimum: 0, maximum: 1 },
+          h: { type: 'number', minimum: 0, maximum: 1 },
+          confidence: { type: 'number', minimum: 0, maximum: 1 },
+        },
+      },
+    },
+    tagBlocks: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['x', 'y', 'w', 'h', 'confidence'],
+        properties: {
+          x: { type: 'number', minimum: 0, maximum: 1 },
+          y: { type: 'number', minimum: 0, maximum: 1 },
+          w: { type: 'number', minimum: 0, maximum: 1 },
+          h: { type: 'number', minimum: 0, maximum: 1 },
+          confidence: { type: 'number', minimum: 0, maximum: 1 },
+        },
+      },
+    },
+    excludeZones: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['x', 'y', 'w', 'h', 'reason'],
+        properties: {
+          x: { type: 'number', minimum: 0, maximum: 1 },
+          y: { type: 'number', minimum: 0, maximum: 1 },
+          w: { type: 'number', minimum: 0, maximum: 1 },
+          h: { type: 'number', minimum: 0, maximum: 1 },
+          reason: { type: 'string' },
+        },
+      },
+    },
+  },
+} as const;
 
 export interface GridPromptDraft {
   id: number;
@@ -102,6 +216,39 @@ export const PAGE_USER_PROMPT = [
   '完成后进行覆盖检查：检查顶部、底部、左右侧栏和各谱系分支是否漏字；检查是否有重复坐标或虚构字符。',
   '输出完整 JSON，禁止解释。',
 ].join('\n');
+
+/** C 模式用户提示词（整页 + 本地分割锚点，保证字位数量守恒） */
+export function buildPageAnchoredUserPrompt(
+  chars: Array<{ cx: number; cy: number; kind?: string; group?: string }>,
+  widthPx: number,
+  heightPx: number,
+): string {
+  const anchors = chars.map((c, id) => ({
+    id,
+    rx: Math.round((c.cx / widthPx) * 10000) / 10000,
+    ry: Math.round((c.cy / heightPx) * 10000) / 10000,
+    ...(c.kind === 'side' ? { region: 'margin' as const, group: c.group ?? 'title' } : {}),
+  }));
+  return [
+    PAGE_USER_PROMPT,
+    '',
+    `【字位锚点】本地分割已标出 ${anchors.length} 个待识字，下列 id/rx/ry 为各字中心相对坐标（0–1，原点左上）。`,
+    'region=margin 的锚点为页边标题或页码，字号可能与正文差异很大，请优先对照原图逐字识别，不得漏字。',
+    '你必须为每个 id 返回恰好一条 items 记录：items.length 必须等于锚点数量，id 从 0 到 count-1 各出现一次，不得遗漏、合并或虚构。',
+    'char 应对应该 id 坐标处可见字形；看不清返回 null；谱系线、节点圆、外框不是文字。',
+    JSON.stringify({ anchors }),
+  ].join('\n');
+}
+
+/** 整页锚点识别二次校验 */
+export function buildPageAnchoredReviewPrompt(draft: string, count: number): string {
+  return [
+    `附件仍是同一页族谱整页图。本地分割共 ${count} 个字位锚点。第一次识别 JSON：`,
+    draft,
+    `请逐 id 重新对照原图复核，items 长度必须仍为 ${count}，每个 id 恰好一条。`,
+    '纠正误字、漏字与 confidence；无法确认返回 null。只输出 JSON。',
+  ].join('\n');
+}
 
 /** 整页识别二次校验提示：复核文字与坐标，但不得补写原图不存在的内容。 */
 export function buildPageReviewPrompt(draft: string): string {

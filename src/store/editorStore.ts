@@ -18,14 +18,18 @@ export type EditCommand =
   | { type: 'char.addMany'; chars: CharItem[] }
   | { type: 'char.remove'; char: CharItem }
   | { type: 'char.batchMove'; ids: string[]; dx: number; dy: number }
-  | { type: 'char.batchResize'; ids: string[]; beforePts: Record<string, number>; pt: number }
+  | { type: 'char.batchBbox'; before: Record<string, { cx: number; cy: number; bbox: [number, number, number, number] }>; after: Record<string, { cx: number; cy: number; bbox: [number, number, number, number] }> }
+  | { type: 'char.batchResize'; ids: string[]; beforePts: Record<string, number>; pt?: number; afterPts?: Record<string, number> }
   | { type: 'line.update'; id: string; before: Record<string, number>; after: Record<string, number> }
+  | { type: 'line.batchMove'; ids: string[]; dx: number; dy: number }
   | { type: 'line.add'; line: TreeLine }
   | { type: 'line.remove'; line: TreeLine }
   | { type: 'node.update'; id: string; before: Record<string, number>; after: Record<string, number> }
+  | { type: 'node.batchMove'; ids: string[]; dx: number; dy: number }
   | { type: 'node.add'; node: TreeNode }
   | { type: 'node.remove'; node: TreeNode }
   | { type: 'rect.update'; id: string; before: Record<string, number>; after: Record<string, number> }
+  | { type: 'rect.batchMove'; ids: string[]; dx: number; dy: number }
   | { type: 'rect.add'; rect: BorderRect | TagRect; kind: 'border' | 'tag' }
   | { type: 'rect.remove'; rect: BorderRect | TagRect; kind: 'border' | 'tag' };
 
@@ -39,9 +43,9 @@ export type OverlayMode = 'split' | 'overlay';
 
 interface EditorState {
   selectedCharIds: string[];
-  selectedLineId: string | null;
-  selectedNodeId: string | null;
-  selectedRectId: string | null;
+  selectedLineIds: string[];
+  selectedNodeIds: string[];
+  selectedRectIds: string[];
   transform: ViewTransform;
   /** 校对操作区视口尺寸，用于低置信跳转居中 */
   canvasViewSize: { w: number; h: number };
@@ -51,6 +55,8 @@ interface EditorState {
   lowConfCursor: number;
   /** 低置信列表悬停预览（未选中时操作区跟随） */
   lowConfHoverId: string | null;
+  /** 校对操作区标尺与参考线 */
+  showRulers: boolean;
   /** 框选矩形（图像坐标），供原图区同步高亮 */
   rubberBand: { x0: number; y0: number; x1: number; y1: number } | null;
   undoStack: EditCommand[];
@@ -59,17 +65,20 @@ interface EditorState {
   stackPageId: string | null;
 
   setSelection: (ids: string[]) => void;
+  /** 框选：同时选中字符、线段、节点与装饰矩形 */
+  setRegionSelection: (charIds: string[], lineIds: string[], nodeIds: string[], rectIds: string[]) => void;
   setSelectedLine: (id: string | null) => void;
   setSelectedNode: (id: string | null) => void;
   setSelectedRect: (id: string | null) => void;
   setTransform: (t: Partial<ViewTransform>) => void;
   setCanvasViewSize: (size: { w: number; h: number }) => void;
-  /** 将字符居中到校对操作区视口 */
-  centerOnChar: (cx: number, cy: number, minScale?: number) => void;
+  /** 将字符居中到校对操作区视口（保持当前缩放，仅平移） */
+  centerOnChar: (cx: number, cy: number) => void;
   setOverlayMode: (m: OverlayMode) => void;
   setOverlayOpacity: (v: number) => void;
   setLowConfCursor: (i: number) => void;
   setLowConfHoverId: (id: string | null) => void;
+  setShowRulers: (v: boolean) => void;
   setRubberBand: (band: { x0: number; y0: number; x1: number; y1: number } | null) => void;
 
   loadStacks: (pageId: string) => Promise<void>;
@@ -118,18 +127,44 @@ function applyCommandToPage(page: Page, cmd: EditCommand, direction: 'do' | 'und
       );
       break;
     }
+    case 'char.batchBbox': {
+      p.chars = p.chars.map((c) => {
+        const patch = direction === 'do' ? cmd.after[c.id] : cmd.before[c.id];
+        return patch ? { ...c, ...patch, edited: true } : c;
+      });
+      break;
+    }
     case 'char.batchResize': {
       const idSet = new Set(cmd.ids);
-      p.chars = p.chars.map((c) =>
-        idSet.has(c.id)
-          ? { ...c, pt: direction === 'do' ? cmd.pt : cmd.beforePts[c.id] ?? c.pt, edited: true }
-          : c,
-      );
+      p.chars = p.chars.map((c) => {
+        if (!idSet.has(c.id)) return c;
+        const pt =
+          direction === 'do'
+            ? (cmd.afterPts?.[c.id] ?? cmd.pt ?? c.pt)
+            : (cmd.beforePts[c.id] ?? c.pt);
+        return { ...c, pt, edited: true };
+      });
       break;
     }
     case 'line.update': {
       const patch = direction === 'do' ? cmd.after : cmd.before;
       p.treeLines = p.treeLines.map((l) => (l.id === cmd.id ? { ...l, ...patch } : l));
+      break;
+    }
+    case 'line.batchMove': {
+      const sign = direction === 'do' ? 1 : -1;
+      const idSet = new Set(cmd.ids);
+      p.treeLines = p.treeLines.map((l) =>
+        idSet.has(l.id)
+          ? {
+              ...l,
+              x1: l.x1 + sign * cmd.dx,
+              y1: l.y1 + sign * cmd.dy,
+              x2: l.x2 + sign * cmd.dx,
+              y2: l.y2 + sign * cmd.dy,
+            }
+          : l,
+      );
       break;
     }
     case 'line.add': {
@@ -145,6 +180,14 @@ function applyCommandToPage(page: Page, cmd: EditCommand, direction: 'do' | 'und
       p.treeNodes = p.treeNodes.map((n) => (n.id === cmd.id ? { ...n, ...patch } : n));
       break;
     }
+    case 'node.batchMove': {
+      const sign = direction === 'do' ? 1 : -1;
+      const idSet = new Set(cmd.ids);
+      p.treeNodes = p.treeNodes.map((n) =>
+        idSet.has(n.id) ? { ...n, cx: n.cx + sign * cmd.dx, cy: n.cy + sign * cmd.dy } : n,
+      );
+      break;
+    }
     case 'node.add': {
       p.treeNodes = direction === 'do' ? [...p.treeNodes, cmd.node] : p.treeNodes.filter((node) => node.id !== cmd.node.id);
       break;
@@ -157,6 +200,13 @@ function applyCommandToPage(page: Page, cmd: EditCommand, direction: 'do' | 'und
       const patch = direction === 'do' ? cmd.after : cmd.before;
       p.borderRects = p.borderRects.map((r) => (r.id === cmd.id ? { ...r, ...patch } : r));
       p.tagRects = p.tagRects.map((r) => (r.id === cmd.id ? { ...r, ...patch } : r));
+      break;
+    }
+    case 'rect.batchMove': {
+      const sign = direction === 'do' ? 1 : -1;
+      const idSet = new Set(cmd.ids);
+      p.borderRects = p.borderRects.map((r) => (idSet.has(r.id) ? { ...r, x: r.x + sign * cmd.dx, y: r.y + sign * cmd.dy } : r));
+      p.tagRects = p.tagRects.map((r) => (idSet.has(r.id) ? { ...r, x: r.x + sign * cmd.dx, y: r.y + sign * cmd.dy } : r));
       break;
     }
     case 'rect.add': {
@@ -185,37 +235,59 @@ function persistStacks(pageId: string, undoStack: EditCommand[], redoStack: Edit
 
 export const useEditorStore = create<EditorState>((set, get) => ({
   selectedCharIds: [],
-  selectedLineId: null,
-  selectedNodeId: null,
-  selectedRectId: null,
+  selectedLineIds: [],
+  selectedNodeIds: [],
+  selectedRectIds: [],
   transform: { scale: 0.2, offsetX: 0, offsetY: 0 },
   canvasViewSize: { w: 0, h: 0 },
   overlayMode: 'split',
   overlayOpacity: 0.5,
   lowConfCursor: 0,
   lowConfHoverId: null,
+  showRulers: false,
   rubberBand: null,
   undoStack: [],
   redoStack: [],
   stackPageId: null,
 
-  setSelection: (ids) => set({ selectedCharIds: ids, selectedLineId: null, selectedNodeId: null, selectedRectId: null }),
-  setSelectedLine: (id) => set({ selectedLineId: id, selectedCharIds: id ? [] : get().selectedCharIds, selectedNodeId: null, selectedRectId: null }),
-  setSelectedNode: (id) => set({ selectedNodeId: id, selectedCharIds: id ? [] : get().selectedCharIds, selectedLineId: null, selectedRectId: null }),
-  setSelectedRect: (id) => set({ selectedRectId: id, selectedCharIds: id ? [] : get().selectedCharIds, selectedLineId: null, selectedNodeId: null }),
+  setSelection: (ids) =>
+    set({ selectedCharIds: ids, selectedLineIds: [], selectedNodeIds: [], selectedRectIds: [] }),
+  setRegionSelection: (charIds, lineIds, nodeIds, rectIds) =>
+    set({ selectedCharIds: charIds, selectedLineIds: lineIds, selectedNodeIds: nodeIds, selectedRectIds: rectIds }),
+  setSelectedLine: (id) =>
+    set({
+      selectedLineIds: id ? [id] : [],
+      selectedCharIds: id ? [] : get().selectedCharIds,
+      selectedNodeIds: [],
+      selectedRectIds: [],
+    }),
+  setSelectedNode: (id) =>
+    set({
+      selectedNodeIds: id ? [id] : [],
+      selectedCharIds: id ? [] : get().selectedCharIds,
+      selectedLineIds: [],
+      selectedRectIds: [],
+    }),
+  setSelectedRect: (id) =>
+    set({
+      selectedRectIds: id ? [id] : [],
+      selectedCharIds: id ? [] : get().selectedCharIds,
+      selectedLineIds: [],
+      selectedNodeIds: [],
+    }),
   setTransform: (t) => set((s) => ({ transform: { ...s.transform, ...t } })),
   setCanvasViewSize: (size) => set({ canvasViewSize: size }),
-  centerOnChar: (cx, cy, minScale = 0.35) => {
+  centerOnChar: (cx, cy) => {
     const { canvasViewSize, transform } = get();
     const { w, h } = canvasViewSize;
     if (w <= 0 || h <= 0) return;
-    const scale = Math.max(transform.scale, minScale);
-    set({ transform: computeCenterOnPoint(cx, cy, w, h, scale) });
+    set({ transform: computeCenterOnPoint(cx, cy, w, h, transform.scale) });
   },
   setOverlayMode: (m) => set({ overlayMode: m }),
   setOverlayOpacity: (v) => set({ overlayOpacity: v }),
   setLowConfCursor: (i) => set({ lowConfCursor: i }),
   setLowConfHoverId: (id) => set({ lowConfHoverId: id }),
+  setShowRulers: (v) => set({ showRulers: v }),
   setRubberBand: (band) => set({ rubberBand: band }),
 
   loadStacks: async (pageId) => {
@@ -226,9 +298,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       undoStack: record?.undoStack ?? [],
       redoStack: record?.redoStack ?? [],
       selectedCharIds: [],
-      selectedLineId: null,
-      selectedNodeId: null,
-      selectedRectId: null,
+      selectedLineIds: [],
+      selectedNodeIds: [],
+      selectedRectIds: [],
       lowConfCursor: 0,
       lowConfHoverId: null,
       rubberBand: null,

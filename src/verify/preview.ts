@@ -4,6 +4,8 @@
  */
 import { MM_PER_PT } from '@/lib/constants';
 import type { Page } from '@/model/types';
+import { isRenderableSolidBorderRect } from '@/layout/detect';
+import { drawBorderBar, drawTagBlock } from '@/layout/borderBar';
 
 export const PREVIEW_FONT_FAMILY = '"Noto Serif CJK TC", "Source Han Serif TC", "Noto Serif CJK SC", "SimSun", serif';
 /** v7 脚本直接使用 Scribus pt，不额外放大浏览器预览。 */
@@ -31,23 +33,14 @@ export function renderPreviewToCanvas(page: Page, canvas: HTMLCanvasElement): vo
   ctx.strokeStyle = '#000000';
 
   // 外框实心黑条与装饰块
-  for (const r of [...page.borderRects, ...page.tagRects]) {
-    ctx.fillRect(r.x, r.y, r.w, r.h);
+  for (const r of page.borderRects) {
+    if (isRenderableSolidBorderRect(r, w, h)) drawBorderBar(ctx, r);
+    else {
+      ctx.lineWidth = 2;
+      ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+    }
   }
-  // v7 黑标底部的白色折角，按黑标矩形相对位置复原。
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineCap = 'butt';
-  for (const r of page.tagRects) {
-    if (r.w < 40 || r.h < 40) continue;
-    const y = r.y + r.h * 0.77;
-    const midX = r.x + r.w * 0.50;
-    ctx.lineWidth = Math.max(1, r.w * 0.10);
-    ctx.beginPath();
-    ctx.moveTo(r.x + r.w * 0.12, y + r.h * 0.23);
-    ctx.lineTo(midX, y);
-    ctx.lineTo(r.x + r.w * 0.88, y + r.h * 0.23);
-    ctx.stroke();
-  }
+  for (const r of page.tagRects) drawTagBlock(ctx, r);
   // 谱系连线
   ctx.strokeStyle = '#000000';
   ctx.lineCap = 'butt';
@@ -84,10 +77,16 @@ export function renderPreviewToCanvas(page: Page, canvas: HTMLCanvasElement): vo
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   for (const c of page.chars) {
-    if (!c.text || c.pt <= 0) continue;
-    const fontPx = ptToPx(c.pt, pxPerMm) * PREVIEW_FONT_SCALE;
-    ctx.font = `500 ${fontPx}px ${PREVIEW_FONT_FAMILY}`;
-    ctx.fillText(c.text, c.cx, c.cy);
+    const [x0, y0, x1, y1] = c.bbox;
+    if (c.text && c.pt > 0) {
+      const fontPx = ptToPx(c.pt, pxPerMm) * PREVIEW_FONT_SCALE;
+      ctx.font = `500 ${fontPx}px ${PREVIEW_FONT_FAMILY}`;
+      ctx.fillStyle = '#000000';
+      ctx.fillText(c.text, c.cx, c.cy);
+    } else if (c.pt > 0) {
+      ctx.fillStyle = 'rgba(0,0,0,0.07)';
+      ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    }
   }
 }
 

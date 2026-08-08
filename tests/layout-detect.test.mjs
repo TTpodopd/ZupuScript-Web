@@ -1,5 +1,6 @@
 import { check, eq, section, summary } from './helpers.mjs';
 import { detectRects, detectTreeLines } from '../src/layout/detect.ts';
+import { isSolidGraphicBlock, isTextLikeBlock } from '../src/layout/graphicBlock.ts';
 import { detectNodes } from '../src/layout/nodes.ts';
 
 function block(bin, width, x, y, w, h) {
@@ -17,7 +18,8 @@ block(bin, width, 20, 180, 360, 90);
 
 const rects = detectRects(bin, width, height);
 eq('细横线不进入边框矩形', rects.borderRects.filter((rect) => rect.y < 100).length, 0);
-eq('厚实心边条只保留一个矩形', rects.borderRects.length, 1);
+eq('厚实心装饰块归入 tagRects', rects.tagRects.length, 1);
+eq('页框矩形不为正文区横条', rects.borderRects.filter((rect) => rect.y > 100).length, 0);
 
 const lines = detectTreeLines(bin, width, height, rects.rectMask);
 check('细横线进入谱系线集合', lines.some((line) => line.orientation === 'h' && Math.abs(line.y1 - 51.5) < 3));
@@ -62,5 +64,58 @@ block(pdfBin, pdfW, pdfW - 4, 0, 4, pdfH);
 block(pdfBin, pdfW, 0, pdfH - 4, pdfW, 4);
 const pdfRects = detectRects(pdfBin, pdfW, pdfH);
 check('页边 4px 细框可被检出', pdfRects.borderRects.length >= 1);
+check('不会把整页误判为实心黑块', pdfRects.borderRects.every((r) => r.w * r.h < pdfW * pdfH * 0.12));
+
+section('扫描件厚页框（内缩白边）');
+const scanW = 2400;
+const scanH = 3200;
+const scanBin = new Uint8Array(scanW * scanH);
+const frameX = 120;
+const frameY = 80;
+const frameW = 2000;
+const frameH = 3000;
+const thick = 48;
+block(scanBin, scanW, frameX, frameY, frameW, thick);
+block(scanBin, scanW, frameX, frameY + frameH - thick, frameW, thick);
+block(scanBin, scanW, frameX, frameY, thick, frameH);
+block(scanBin, scanW, frameX + frameW - thick, frameY, thick, frameH);
+const scanRects = detectRects(scanBin, scanW, scanH);
+check('厚页框四边均可检出', scanRects.borderRects.length >= 4);
+check('厚页框不会整页涂黑', scanRects.borderRects.every((r) => r.w * r.h < scanW * scanH * 0.12));
+
+section('正文竖列不应被误判为边框');
+const colW = 800;
+const colH = 1100;
+const colBin = new Uint8Array(colW * colH);
+for (let col = 0; col < 5; col += 1) {
+  const x = 80 + col * 120;
+  for (let row = 0; row < 40; row += 1) {
+    block(colBin, colW, x, 120 + row * 22, 18, 18);
+  }
+}
+block(colBin, colW, 0, 0, colW, 4);
+block(colBin, colW, 0, 0, 4, colH);
+const colRects = detectRects(colBin, colW, colH);
+check('竖排正文列不进入边框', colRects.borderRects.every((r) => Math.min(r.w, r.h) <= 12));
+
+section('空白页边噪声不应生成竖条');
+const marginW = 800;
+const marginH = 1100;
+const marginBin = new Uint8Array(marginW * marginH);
+block(marginBin, marginW, 0, 0, marginW, 4);
+block(marginBin, marginW, 0, 0, 4, marginH);
+block(marginBin, marginW, 0, marginH - 4, marginW, 4);
+block(marginBin, marginW, marginW - 30, 40, 2, 2);
+block(marginBin, marginW, marginW - 28, marginH - 60, 2, 2);
+const marginRects = detectRects(marginBin, marginW, marginH);
+check('右侧空白仅噪声时不生成竖条', !marginRects.borderRects.some((r) => r.x > marginW * 0.9 && r.h > marginH * 0.5));
+
+section('装饰块与文字分流');
+const textColBin = new Uint8Array(120 * 400);
+for (let i = 0; i < 8; i += 1) block(textColBin, 120, 40, 30 + i * 42, 36, 32);
+const solidBin = new Uint8Array(120 * 400);
+block(solidBin, 120, 35, 40, 50, 180);
+check('竖排文字列不应判为装饰块', isTextLikeBlock(textColBin, 120, 400, { x: 30, y: 20, w: 60, h: 360 }));
+check('实心书标块应判为装饰图形', isSolidGraphicBlock(solidBin, 120, 400, { x: 30, y: 35, w: 55, h: 190 }));
 
 summary('layout detect pdf');

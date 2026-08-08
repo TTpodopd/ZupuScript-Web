@@ -11,7 +11,7 @@ import { grantConsent, isForcedLocal, revokeConsent } from '@/privacy/consent';
 import { hasApiKey, loadApiKey, saveApiKey } from '@/privacy/keystore';
 import { clearAllStores } from '@/storage/db';
 import { clearAllImages } from '@/storage/opfs';
-import { useSettingsStore, type ModelConnection } from '@/store/settingsStore';
+import { useSettingsStore, LOCAL_MODEL_CONNECTION_ID, type ModelConnection } from '@/store/settingsStore';
 import { downloadText, formatTime } from '@/lib/utils';
 import type { PrivacyMode } from '@/model/types';
 import type { ProviderId } from '@/recognize/types';
@@ -24,6 +24,7 @@ const providerOptions: Array<{ value: ProviderId; label: string }> = [
 ];
 
 function connectionLabel(connection: ModelConnection): string {
+  if (connection.kind === 'local') return '本地引擎';
   return connection.kind === 'compatible' ? 'OpenAI 兼容' : '官方 API';
 }
 
@@ -39,6 +40,8 @@ function ModelConnectionsPanel() {
   const activeModel = active?.models.find((m) => m.id === settings.activeModelId);
   const official = settings.connections.filter((c) => c.kind === 'official');
   const compatible = settings.connections.filter((c) => c.kind === 'compatible');
+  const localConnection = settings.connections.find((c) => c.id === LOCAL_MODEL_CONNECTION_ID);
+  const isLocalActive = settings.activeConnectionId === LOCAL_MODEL_CONNECTION_ID;
 
   const setKeyDraft = (connectionId: string, value: string) => {
     setKeyDrafts((prev) => ({ ...prev, [connectionId]: value }));
@@ -104,6 +107,7 @@ function ModelConnectionsPanel() {
   };
 
   const renderCard = (connection: ModelConnection) => {
+    if (connection.kind === 'local') return null;
     const isActive = connection.id === settings.activeConnectionId;
     const keyDraft = keyDrafts[connection.id] ?? '';
     const saved = keySaved[connection.id] ?? false;
@@ -150,7 +154,73 @@ function ModelConnectionsPanel() {
     );
   };
 
-  return <div className="space-y-5"><div><div className="mb-2 flex items-center justify-between"><div><h3 className="font-semibold">官方 API</h3><p className="text-xs text-muted-foreground">DeepSeek、OpenAI、Gemini、Claude 等官方接口。</p></div><span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">{official.filter((c) => c.models.some((m) => m.id)).length}/{official.length} 已配置</span></div><div className="space-y-2">{official.map(renderCard)}</div></div><div><div className="mb-2 flex items-center justify-between"><div><h3 className="font-semibold">OpenAI 兼容第三方 API</h3><p className="text-xs text-muted-foreground">云赛、New API、Ollama 及其他兼容服务。</p></div><Button size="sm" variant="ghost" onClick={() => settings.addConnection('compatible')}><Plus className="h-4 w-4" /> 添加分组</Button></div><div className="space-y-2">{compatible.map(renderCard)}</div></div><div className="rounded-lg bg-muted/60 p-3 text-xs text-muted-foreground">当前识别：{active?.name ?? '未选择'} / {activeModel?.name || activeModel?.id || '未选择模型'}。API Key 仅保存在本机，不会写入项目文件。</div></div>;
+  return (
+    <div className="space-y-5">
+      {localConnection && (
+        <div>
+          <div className="mb-2">
+            <h3 className="font-semibold">本地模型</h3>
+            <p className="text-xs text-muted-foreground">纯本地 OCR 与 CV 算法，无需 API Key，图像不出本机。</p>
+          </div>
+          <div className={`rounded-xl border bg-card/70 p-4 transition-colors ${isLocalActive ? 'border-primary/50 shadow-soft' : 'border-border/70'}`}>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">{localConnection.name}</span>
+                  <span className="rounded-full bg-secondary px-2 py-0.5 text-xs text-secondary-foreground">本地引擎</span>
+                  {isLocalActive && (
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">当前使用</span>
+                  )}
+                </div>
+                <p className="text-xs leading-relaxed text-muted-foreground">{localConnection.description}</p>
+                <p className="text-xs text-muted-foreground">引擎：{localConnection.models[0]?.name ?? 'Tesseract（chi_tra）'}</p>
+              </div>
+              <Button
+                size="sm"
+                variant={isLocalActive ? 'secondary' : 'outline'}
+                onClick={() => settings.setActiveConnection(LOCAL_MODEL_CONNECTION_ID)}
+              >
+                {isLocalActive && <Check className="h-3.5 w-3.5" />}
+                {isLocalActive ? '正在使用' : '使用本地模型'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div>
+        <div className="mb-2 flex items-center justify-between">
+          <div>
+            <h3 className="font-semibold">官方 API</h3>
+            <p className="text-xs text-muted-foreground">DeepSeek、OpenAI、Gemini、Claude 等官方接口。</p>
+          </div>
+          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+            {official.filter((c) => c.models.some((m) => m.id)).length}/{official.length} 已配置
+          </span>
+        </div>
+        <div className="space-y-2">{official.map(renderCard)}</div>
+      </div>
+
+      <div>
+        <div className="mb-2 flex items-center justify-between">
+          <div>
+            <h3 className="font-semibold">OpenAI 兼容第三方 API</h3>
+            <p className="text-xs text-muted-foreground">云赛、New API、Ollama 及其他兼容服务。</p>
+          </div>
+          <Button size="sm" variant="ghost" onClick={() => settings.addConnection('compatible')}>
+            <Plus className="h-4 w-4" /> 添加分组
+          </Button>
+        </div>
+        <div className="space-y-2">{compatible.map(renderCard)}</div>
+      </div>
+
+      <div className="rounded-lg bg-muted/60 p-3 text-xs text-muted-foreground">
+        {isLocalActive
+          ? '当前识别：本地模型（Tesseract），不调用任何云端接口，图像不出本机。'
+          : `当前识别：${active?.name ?? '未选择'} / ${activeModel?.name || activeModel?.id || '未选择模型'}。API Key 仅保存在本机，不会写入项目文件。`}
+      </div>
+    </div>
+  );
 }
 
 export default function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
@@ -168,5 +238,5 @@ export default function SettingsDialog({ open, onOpenChange }: { open: boolean; 
     location.reload();
   };
 
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto"><DialogHeader><DialogTitle>设置</DialogTitle></DialogHeader><Tabs defaultValue="models"><TabsList><TabsTrigger value="models">模型接入</TabsTrigger><TabsTrigger value="recognize">识别参数</TabsTrigger><TabsTrigger value="privacy">隐私与审计</TabsTrigger><TabsTrigger value="about">关于</TabsTrigger></TabsList><TabsContent value="models" className="pt-3"><ModelConnectionsPanel /></TabsContent><TabsContent value="recognize" className="space-y-3 pt-3"><div className="grid gap-3 md:grid-cols-2"><div><Label>并发数（≤{MAX_CONCURRENCY}）</Label><Input type="number" min={1} max={MAX_CONCURRENCY} value={settings.concurrency} onChange={(e) => settings.setConcurrency(parseInt(e.target.value, 10))} /></div><div><Label>超时（毫秒）</Label><Input type="number" min={5000} step={5000} value={settings.timeoutMs} onChange={(e) => settings.setTimeoutMs(parseInt(e.target.value, 10) || 60000)} /></div><div><Label>失败重试次数</Label><Input type="number" min={0} max={5} value={settings.maxRetries} onChange={(e) => settings.setMaxRetries(parseInt(e.target.value, 10))} /></div><div><Label>默认隐私模式</Label><Select value={settings.privacyMode} onChange={(e) => settings.setPrivacyMode(e.target.value as PrivacyMode)} disabled={forcedLocal} options={[{ value: 'A', label: 'A · 全本地' }, { value: 'B', label: 'B · 拼图上云' }, { value: 'C', label: 'C · 整页上云' }]} /></div><div><Label>单页成本上限（元）</Label><Input type="number" min={0} step={0.1} value={settings.pageBudgetCny} onChange={(e) => settings.setPageBudgetCny(parseFloat(e.target.value) || 0)} /></div><div><Label>单项目成本上限（元）</Label><Input type="number" min={0} step={1} value={settings.projectBudgetCny} onChange={(e) => settings.setProjectBudgetCny(parseFloat(e.target.value) || 0)} /></div><div><Label>输出字形</Label><Select value={settings.outputScript} onChange={(e) => settings.setOutputScript(e.target.value as 'original' | 'simplified')} options={[{ value: 'original', label: '原字形（1:1 复刻）' }, { value: 'simplified', label: '简化字' }]} /></div></div></TabsContent><TabsContent value="privacy" className="space-y-3 pt-3"><div className="rounded-md bg-muted p-3 text-sm">当前隐私模式：<b>{settings.privacyMode}</b>{forcedLocal && <span className="ml-2 rounded bg-destructive px-1.5 py-0.5 text-xs text-destructive-foreground">已锁定全本地</span>}<span className="ml-4">本次会话已上行图片：<b>{getSessionUploads()}</b> 张</span><span className="ml-4">累计成本：<b>¥{settings.sessionCostCny.toFixed(3)}</b></span></div><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">隐私审计日志（保留 30 天）</h3><div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => downloadText('隐私审计日志.txt', exportAuditText(audit))}><Download className="h-4 w-4" />导出</Button><Button size="sm" variant="outline" onClick={() => void clearAuditLogs().then(() => setAudit([]))}>清空日志</Button></div></div><div className="max-h-48 overflow-y-auto rounded border">{audit.length === 0 ? <p className="p-3 text-xs text-muted-foreground">暂无记录。每次云端识别都会记录时间、模式、字符数与目标域名。</p> : <table className="w-full text-xs"><thead><tr className="border-b bg-muted"><th className="p-1.5 text-left">时间</th><th className="p-1.5 text-left">模式</th><th className="p-1.5 text-left">厂商</th><th className="p-1.5 text-left">域名</th><th className="p-1.5 text-right">字符数</th></tr></thead><tbody>{audit.map((a) => <tr key={a.id} className="border-b last:border-0"><td className="p-1.5">{formatTime(a.ts)}</td><td className="p-1.5">{a.mode}</td><td className="p-1.5">{a.provider}</td><td className="p-1.5">{a.domain}</td><td className="p-1.5 text-right">{a.charCount}</td></tr>)}</tbody></table>}</div><Button variant="destructive" onClick={() => void handleWipe()}><Trash2 className="h-4 w-4" />一键清空本地全部数据</Button></TabsContent><TabsContent value="about" className="space-y-2 pt-3 text-sm"><p><b>ZupuScript Web</b> —— 族谱图像转 Scribus 脚本工具（v2.0）。图像与项目数据全程留在本地，只有明确同意后的识别调用会出网。</p><p className="text-muted-foreground">配套软件：Scribus 1.6.6（Python 3 Scripter）。</p></TabsContent></Tabs></DialogContent></Dialog>;
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto"><DialogHeader><DialogTitle>设置</DialogTitle></DialogHeader><Tabs defaultValue="models"><TabsList><TabsTrigger value="models">模型接入</TabsTrigger><TabsTrigger value="recognize">识别参数</TabsTrigger><TabsTrigger value="privacy">隐私与审计</TabsTrigger><TabsTrigger value="about">关于</TabsTrigger></TabsList><TabsContent value="models" className="pt-3"><ModelConnectionsPanel /></TabsContent><TabsContent value="recognize" className="space-y-3 pt-3"><div className="grid gap-3 md:grid-cols-2"><div><Label>并发数（≤{MAX_CONCURRENCY}）</Label><Input type="number" min={1} max={MAX_CONCURRENCY} value={settings.concurrency} onChange={(e) => settings.setConcurrency(parseInt(e.target.value, 10))} /></div><div><Label>超时（毫秒）</Label><Input type="number" min={5000} step={5000} value={settings.timeoutMs} onChange={(e) => settings.setTimeoutMs(parseInt(e.target.value, 10) || 60000)} /></div><div><Label>失败重试次数</Label><Input type="number" min={0} max={5} value={settings.maxRetries} onChange={(e) => settings.setMaxRetries(parseInt(e.target.value, 10))} /></div><div><Label>识别模式</Label><Select value={settings.privacyMode} onChange={(e) => settings.setPrivacyMode(e.target.value as PrivacyMode)} disabled={forcedLocal} options={[{ value: 'A', label: 'A · 全本地' }, { value: 'C', label: 'C · 整页上云（远端默认）' }]} /><p className="mt-1 text-xs text-muted-foreground">选择云端模型连接时自动使用模式 C。</p></div><div><Label>单页成本上限（元）</Label><Input type="number" min={0} step={0.1} value={settings.pageBudgetCny} onChange={(e) => settings.setPageBudgetCny(parseFloat(e.target.value) || 0)} /></div><div><Label>单项目成本上限（元）</Label><Input type="number" min={0} step={1} value={settings.projectBudgetCny} onChange={(e) => settings.setProjectBudgetCny(parseFloat(e.target.value) || 0)} /></div><div><Label>输出字形</Label><Select value={settings.outputScript} onChange={(e) => settings.setOutputScript(e.target.value as 'original' | 'simplified')} options={[{ value: 'original', label: '原字形（1:1 复刻）' }, { value: 'simplified', label: '简化字' }]} /></div></div></TabsContent><TabsContent value="privacy" className="space-y-3 pt-3"><div className="rounded-md bg-muted p-3 text-sm">当前隐私模式：<b>{settings.privacyMode}</b>{forcedLocal && <span className="ml-2 rounded bg-destructive px-1.5 py-0.5 text-xs text-destructive-foreground">已锁定全本地</span>}<span className="ml-4">本次会话已上行图片：<b>{getSessionUploads()}</b> 张</span><span className="ml-4">累计成本：<b>¥{settings.sessionCostCny.toFixed(3)}</b></span></div><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">隐私审计日志（保留 30 天）</h3><div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => downloadText('隐私审计日志.txt', exportAuditText(audit))}><Download className="h-4 w-4" />导出</Button><Button size="sm" variant="outline" onClick={() => void clearAuditLogs().then(() => setAudit([]))}>清空日志</Button></div></div><div className="max-h-48 overflow-y-auto rounded border">{audit.length === 0 ? <p className="p-3 text-xs text-muted-foreground">暂无记录。每次云端识别都会记录时间、模式、字符数与目标域名。</p> : <table className="w-full text-xs"><thead><tr className="border-b bg-muted"><th className="p-1.5 text-left">时间</th><th className="p-1.5 text-left">模式</th><th className="p-1.5 text-left">厂商</th><th className="p-1.5 text-left">域名</th><th className="p-1.5 text-right">字符数</th></tr></thead><tbody>{audit.map((a) => <tr key={a.id} className="border-b last:border-0"><td className="p-1.5">{formatTime(a.ts)}</td><td className="p-1.5">{a.mode}</td><td className="p-1.5">{a.provider}</td><td className="p-1.5">{a.domain}</td><td className="p-1.5 text-right">{a.charCount}</td></tr>)}</tbody></table>}</div><Button variant="destructive" onClick={() => void handleWipe()}><Trash2 className="h-4 w-4" />一键清空本地全部数据</Button></TabsContent><TabsContent value="about" className="space-y-2 pt-3 text-sm"><p><b>ZupuScript Web</b> —— 族谱图像转 Scribus 脚本工具（v2.0）。图像与项目数据全程留在本地，只有明确同意后的识别调用会出网。</p><p className="text-muted-foreground">配套软件：Scribus 1.6.6（Python 3 Scripter）。</p></TabsContent></Tabs></DialogContent></Dialog>;
 }

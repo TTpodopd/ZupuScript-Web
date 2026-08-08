@@ -14,6 +14,21 @@ import {
 import type { PrivacyMode } from '@/model/types';
 import type { ProviderId } from '@/recognize/types';
 
+/** 设置里「本地模型」分组的固定 id */
+export const LOCAL_MODEL_CONNECTION_ID = 'local-engine';
+
+export const LOCAL_MODEL_CONNECTION: ModelConnection = {
+  id: LOCAL_MODEL_CONNECTION_ID,
+  kind: 'local',
+  name: '本地模型',
+  description: 'Tesseract 本地 OCR + 本地 CV 算法，图像不出本机，不调用任何云端接口。',
+  provider: 'local',
+  endpoint: '',
+  proxyUrl: '',
+  models: [{ id: 'local-tesseract', name: 'Tesseract（chi_tra）' }],
+  expanded: true,
+};
+
 export interface ProviderSettings {
   provider: ProviderId;
   model: string;
@@ -28,7 +43,7 @@ export interface ModelEntry {
 
 export interface ModelConnection {
   id: string;
-  kind: 'official' | 'compatible';
+  kind: 'official' | 'compatible' | 'local';
   name: string;
   description: string;
   provider: ProviderId;
@@ -85,6 +100,11 @@ export const DEFAULT_MODEL_CONNECTIONS: ModelConnection[] = [
   },
 ];
 
+function ensureLocalConnection(connections: ModelConnection[]): ModelConnection[] {
+  const rest = connections.filter((c) => c.id !== LOCAL_MODEL_CONNECTION_ID);
+  return [LOCAL_MODEL_CONNECTION, ...rest];
+}
+
 /** 批处理队列任务（P1 预留类型，极简实现只顺序跑本地分析） */
 export interface BatchTask {
   pageId: string;
@@ -137,9 +157,9 @@ interface SettingsState {
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
-      privacyMode: 'B',
+      privacyMode: 'C',
       provider: { provider: 'gemini', model: 'gemini-2.0-flash', endpoint: '', proxyUrl: '' },
-      connections: DEFAULT_MODEL_CONNECTIONS,
+      connections: ensureLocalConnection(DEFAULT_MODEL_CONNECTIONS),
       activeConnectionId: 'official-gemini',
       activeModelId: 'gemini-2.0-flash',
       concurrency: 3,
@@ -152,7 +172,30 @@ export const useSettingsStore = create<SettingsState>()(
       outputScript: 'original',
       batchQueue: [],
 
-      setPrivacyMode: (m) => set({ privacyMode: m }),
+      setPrivacyMode: (m) => set((s) => {
+        const resolved: PrivacyMode = m === 'A' ? 'A' : 'C';
+        if (resolved === 'A') {
+          const local = s.connections.find((c) => c.id === LOCAL_MODEL_CONNECTION_ID) ?? LOCAL_MODEL_CONNECTION;
+          const model = local.models[0]?.id ?? 'local-tesseract';
+          return {
+            privacyMode: 'A',
+            activeConnectionId: local.id,
+            activeModelId: model,
+            provider: { provider: 'local', model, endpoint: '', proxyUrl: '' },
+          };
+        }
+        if (s.activeConnectionId === LOCAL_MODEL_CONNECTION_ID) {
+          const cloud = s.connections.find((c) => c.kind !== 'local') ?? s.connections[0];
+          const model = cloud.models[0]?.id ?? '';
+          return {
+            privacyMode: 'C',
+            activeConnectionId: cloud.id,
+            activeModelId: model,
+            provider: { provider: cloud.provider, model, endpoint: cloud.endpoint, proxyUrl: cloud.proxyUrl },
+          };
+        }
+        return { privacyMode: 'C' };
+      }),
       setProvider: (patch) => set((s) => {
         const provider = { ...s.provider, ...patch };
         const active = s.connections.find((c) => c.id === s.activeConnectionId);
@@ -167,9 +210,11 @@ export const useSettingsStore = create<SettingsState>()(
         const connection = s.connections.find((c) => c.id === connectionId);
         if (!connection) return s;
         const model = connection.models[0]?.id ?? '';
+        const privacyMode: PrivacyMode = connection.kind === 'local' ? 'A' : 'C';
         return {
           activeConnectionId: connectionId,
           activeModelId: model,
+          privacyMode,
           provider: { provider: connection.provider, model, endpoint: connection.endpoint, proxyUrl: connection.proxyUrl },
         };
       }),
@@ -193,6 +238,7 @@ export const useSettingsStore = create<SettingsState>()(
         return id;
       },
       removeConnection: (connectionId) => set((s) => {
+        if (connectionId === LOCAL_MODEL_CONNECTION_ID) return s;
         if (s.connections.length <= 1) return s;
         const connections = s.connections.filter((c) => c.id !== connectionId);
         if (connectionId !== s.activeConnectionId) return { connections };
@@ -231,11 +277,22 @@ export const useSettingsStore = create<SettingsState>()(
       name: 'zupuscript-settings',
       merge: (persisted, current) => {
         const saved = persisted as Partial<SettingsState>;
-        const connections = saved.connections?.length ? saved.connections : current.connections;
+        const connections = ensureLocalConnection(saved.connections?.length ? saved.connections : current.connections);
         const activeConnectionId = saved.activeConnectionId && connections.some((c) => c.id === saved.activeConnectionId) ? saved.activeConnectionId : current.activeConnectionId;
         const active = connections.find((c) => c.id === activeConnectionId) ?? connections[0];
         const activeModelId = saved.activeModelId && active?.models.some((m) => m.id === saved.activeModelId) ? saved.activeModelId : active?.models[0]?.id ?? current.activeModelId;
-        return { ...current, ...saved, connections, activeConnectionId, activeModelId, provider: active ? { provider: active.provider, model: activeModelId, endpoint: active.endpoint, proxyUrl: active.proxyUrl } : current.provider };
+        const privacyMode = activeConnectionId === LOCAL_MODEL_CONNECTION_ID
+          ? 'A'
+          : 'C';
+        return {
+          ...current,
+          ...saved,
+          connections,
+          activeConnectionId,
+          activeModelId,
+          privacyMode,
+          provider: active ? { provider: active.provider, model: activeModelId, endpoint: active.endpoint, proxyUrl: active.proxyUrl } : current.provider,
+        };
       },
       // 密钥不在此 store，无需过滤；但仍显式排除批处理队列等瞬态
       partialize: (s) => ({

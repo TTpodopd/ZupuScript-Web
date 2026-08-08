@@ -48,4 +48,29 @@ const verticalChars = segmentChars(
 eq('竖排粘连字拆成独立字符且不包含装饰块', verticalChars.length, 5);
 check('拆分后的竖排字框高度接近单字', verticalChars.every((char) => char.bbox[3] - char.bbox[1] <= 22));
 
+section('页边大字与小字');
+const pageWidth = 320;
+const pageHeight = 420;
+const pageBin = new Uint8Array(pageWidth * pageHeight);
+// 正文区三个字（框内）
+block(pageBin, pageWidth, 120, 80, 16, 16);
+block(pageBin, pageWidth, 160, 80, 16, 16);
+block(pageBin, pageWidth, 200, 80, 16, 16);
+// 左侧页边标题（大字，竖排）
+block(pageBin, pageWidth, 18, 40, 28, 34);
+block(pageBin, pageWidth, 18, 82, 28, 34);
+block(pageBin, pageWidth, 18, 124, 28, 34);
+block(pageBin, pageWidth, 18, 166, 28, 34);
+// 左下角页码（小字）
+block(pageBin, pageWidth, 22, 360, 12, 14);
+block(pageBin, pageWidth, 22, 382, 12, 14);
+// 模拟外框：正文在 x=90 以右
+const frameBorder = [{ x: 88, y: 20, w: 4, h: 360 }];
+
+const pageChars = segmentChars(pageBin, pageWidth, pageHeight, [], frameBorder, frameBorder);
+const marginSide = pageChars.filter((c) => c.kind === 'side');
+eq('页边标题与页码识别为 side', marginSide.length, 6);
+check('正文三字保留在框内', pageChars.filter((c) => c.cx > 100).length, 3);
+check('页边大字高度明显大于正文', marginSide.some((c) => c.bbox[3] - c.bbox[1] >= 24));
+
 summary('segment');

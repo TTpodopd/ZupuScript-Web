@@ -1,45 +1,29 @@
 /**
- * 分析页（F2.x / F3.x）：预处理参数（去斜滑块、二值化切换、阈值）+ 运行管线 +
- * 图元遮罩叠示（可逐类开关，F3.7）+ 批处理（P1 极简：连续多页顺序本地处理）。
- * 识别入口（RecognizePanel）嵌在本页底部。
+ * 分析页：后台自动批处理（预处理 → 版面 → 分割 → 识别），仅展示简洁进度，完成后跳转结果画布。
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as Comlink from 'comlink';
-import { Check, ChevronRight, Loader2, Play } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { Button } from '@/ui/components/ui/button';
-import { Label } from '@/ui/components/ui/input';
-import { Select } from '@/ui/components/ui/select';
 import { calibratePage } from '@/calibrate/calibrate';
 import { pageMmFromPx } from '@/calibrate/calibrate';
-import { binaryToImageData } from '@/imaging/raster';
-import { pagesPendingAnalysis, pendingAnalysisSignature } from '@/lib/utils';
+import { applyColumnStructure } from '@/segment/columns';
+import { mergeLayoutWithGuide, finalizeTagRects } from '@/layout/applyGuide';
+import { filterSolidGraphicRects } from '@/layout/graphicBlock';
+import { detectTreeLines } from '@/layout/detect';
+import { detectArtifacts, detectNodes } from '@/layout/nodes';
+import { pagesForBatchProcessing, batchProcessingSignature, inferPageRecognitionSettingsKey } from '@/lib/utils';
 import { PDF_STROKE_DILATE_RADIUS } from '@/lib/constants';
-import type { Page } from '@/model/types';
+import type { BorderLayoutGuide, Page } from '@/model/types';
 import { getBinaryImage, getPageImageData, putBinaryImage } from '@/storage/opfs';
 import { useProjectStore } from '@/store/projectStore';
 import { useSettingsStore } from '@/store/settingsStore';
 import type { PipelineAPI, ProgressInfo } from '@/workers/pipeline.worker';
-import RecognizePanel from './RecognizePanel';
 import { recognizePage } from '@/recognize/orchestrator';
-import { buildProviderConfig } from '@/recognize/buildConfig';
+import { buildProviderConfig, currentRecognitionSettingsKey, describeActiveModel, isLocalRecognitionMode, resolveRecognitionMode } from '@/recognize/buildConfig';
+import { analyzeBorderLayoutVision, canUseVisionLayout, formatVisionFallbackMessage } from '@/recognize/layoutVision';
 import type { RecognizeProgress } from '@/recognize/types';
-import { hasConsented } from '@/privacy/consent';
-
-type MaskKey = 'rects' | 'lines' | 'nodes' | 'tags' | 'artifacts';
-const MASK_COLORS: Record<MaskKey, string> = {
-  rects: 'rgba(220,38,38,0.45)',
-  lines: 'rgba(37,99,235,0.5)',
-  nodes: 'rgba(22,163,74,0.55)',
-  tags: 'rgba(234,88,12,0.45)',
-  artifacts: 'rgba(147,51,234,0.45)',
-};
-const MASK_LABELS: Record<MaskKey, string> = {
-  rects: '外框',
-  lines: '谱系线',
-  nodes: '节点圆',
-  tags: '装饰块',
-  artifacts: '破损痕迹',
-};
+import { grantConsent, hasConsented } from '@/privacy/consent';
 
 function createPipeline(): { worker: Worker; api: Comlink.Remote<PipelineAPI> } {
   const worker = new Worker(new URL('../workers/pipeline.worker.ts', import.meta.url), { type: 'module' });
@@ -55,9 +39,10 @@ function computeBatchOverallPercent(
   progress: ProgressInfo | null,
   recognitionProgress: RecognizeProgress | null,
 ): number {
-  if (!batch || batch.totalPages <= 0) return 5;
+  if (!batch || batch.totalPages <= 0) return 3;
 
   const { totalPages, currentPageIndex, phaseBase } = batch;
+  const pipelineDone = PAGE_PHASE.preprocess + PAGE_PHASE.layout + PAGE_PHASE.segment;
   let pageFraction = phaseBase;
 
   if (recognitionProgress) {
@@ -67,7 +52,8 @@ function computeBatchOverallPercent(
         : recognitionProgress.totalChars > 0
           ? recognitionProgress.recognizedChars / recognitionProgress.totalChars
           : 0;
-    pageFraction = phaseBase + PAGE_PHASE.recognition * Math.min(1, recRatio);
+    const base = phaseBase > 0 ? phaseBase : pipelineDone;
+    pageFraction = base + PAGE_PHASE.recognition * Math.min(1, recRatio);
   } else if (progress) {
     const pct = progress.percent / 100;
     switch (progress.stage) {
@@ -85,10 +71,13 @@ function computeBatchOverallPercent(
       default:
         break;
     }
+  } else if (phaseBase > 0) {
+    pageFraction = phaseBase;
   }
 
   pageFraction = Math.min(1, Math.max(phaseBase, pageFraction));
-  return Math.min(100, ((currentPageIndex + pageFraction) / totalPages) * 100);
+  const raw = ((currentPageIndex + pageFraction) / totalPages) * 100;
+  return Math.min(100, Math.max(0, raw));
 }
 
 function recognitionOnlyPhaseBase(): number {
@@ -102,14 +91,18 @@ export default function AnalyzePage() {
 
   const [progress, setProgress] = useState<ProgressInfo | null>(null);
   const [busy, setBusy] = useState(false);
-  const [autoProcessing, setAutoProcessing] = useState(false);
   const [recognitionProgress, setRecognitionProgress] = useState<RecognizeProgress | null>(null);
   const [message, setMessage] = useState('');
   const [batchProgress, setBatchProgress] = useState<{ totalPages: number; currentPageIndex: number; phaseBase: number } | null>(null);
-  const [masks, setMasks] = useState<Record<MaskKey, boolean>>({ rects: true, lines: true, nodes: true, tags: true, artifacts: false });
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [lastBatchError, setLastBatchError] = useState<string | null>(null);
+  const [consentChecked, setConsentChecked] = useState(false);
   const pipelineRef = useRef<ReturnType<typeof createPipeline> | null>(null);
   const batchStartedRef = useRef<string>('');
+  const recognitionSettingsKey = currentRecognitionSettingsKey();
+  const cloudMode = !isLocalRecognitionMode();
+  const recognizeMode = resolveRecognitionMode();
+  const needsCloudConsent = cloudMode && !hasConsented(recognizeMode);
+  const pendingCount = pagesForBatchProcessing(pages, recognitionSettingsKey).length;
 
   const getPipeline = () => {
     if (!pipelineRef.current) pipelineRef.current = createPipeline();
@@ -119,6 +112,8 @@ export default function AnalyzePage() {
 
   /** ① 预处理：原图 → 去斜/二值化/去噪/DPI 归一 → binary 存 OPFS + calibration 锁定 */
   const runPreprocess = async (target: Page): Promise<Uint8Array | null> => {
+    setProgress({ stage: 'deskew', percent: 0 });
+    setMessage('高清预处理：去斜、二值化、去噪…');
     const image = await getPageImageData(target.imageKey);
     if (!image) {
       setMessage('找不到原图（可能从 .zpproj 导入后尚未重新关联图像）');
@@ -152,7 +147,7 @@ export default function AnalyzePage() {
     return result.binary as Uint8Array;
   };
 
-  /** ② 版面分析 + 字符分割 + 自动标定 */
+  /** ② 版面分析 + 字符分割 + 自动标定（可选：视觉模型先出边框规则再合并） */
   const runAnalyze = async (target: Page, binary?: Uint8Array): Promise<void> => {
     let bin = binary;
     let w = target.source.widthPx;
@@ -168,30 +163,102 @@ export default function AnalyzePage() {
       h = stored.height;
     }
     const { api } = getPipeline();
-    const layout = await api.analyze(bin as Uint8Array, w, h, Comlink.proxy((p: ProgressInfo) => setProgress(p)));
+    const mode = resolveRecognitionMode();
+    let borderLayoutGuide: BorderLayoutGuide | undefined;
+
+    // ① 本地 CV 版面分析（始终执行，不依赖云端）
+    setProgress({ stage: 'layout', percent: 5 });
+    setMessage('本地版面分析：外框、谱系线、节点…');
+    const localLayout = await api.analyze(bin as Uint8Array, w, h, Comlink.proxy((p: ProgressInfo) => setProgress(p)));
+
+    let borderRects = localLayout.borderRects;
+    let tagRects = localLayout.tagRects;
+    let treeLines = localLayout.treeLines;
+    let treeNodes = localLayout.treeNodes;
+    let artifacts = localLayout.artifacts;
+
+    // ② 可选：使用设置中已选云端模型辅助校正边框
+    if (!isLocalRecognitionMode(mode) && hasConsented(mode)) {
+      try {
+        const { cfg } = await buildProviderConfig();
+        if (!canUseVisionLayout(cfg, mode)) throw new Error('skip-vision');
+        const modelLabel = describeActiveModel(cfg);
+        setMessage(`视觉边框分析（${modelLabel}）…`);
+        const vision = await analyzeBorderLayoutVision(
+          bin as Uint8Array,
+          w,
+          h,
+          { borderRects, tagRects },
+          cfg,
+          mode,
+          (p) => {
+            const pct = p.stage === 'encode' ? 55 : p.stage === 'vision' ? 72 : p.stage === 'done' ? 95 : 60;
+            setProgress({ stage: 'layout', percent: pct });
+            if (p.message) setMessage(p.message);
+          },
+        );
+        borderLayoutGuide = vision.guide;
+        setMessage(`边框规则：${vision.guide.summary.slice(0, 80)}${vision.guide.summary.length > 80 ? '…' : ''}`);
+      } catch (err) {
+        if (err instanceof Error && err.message !== 'skip-vision') {
+          console.warn('[layout-vision]', err);
+          setMessage(formatVisionFallbackMessage(err));
+        }
+      }
+    } else if (isLocalRecognitionMode(mode)) {
+      setMessage('本地模式：跳过云端视觉边框，继续字符分割…');
+    }
+
+    // ③ 按视觉规则文档合并 & 重算谱系线
+    if (borderLayoutGuide) {
+      const merged = mergeLayoutWithGuide(
+        bin as Uint8Array,
+        w,
+        h,
+        { borderRects, tagRects, rectMask: new Uint8Array((bin as Uint8Array).length) },
+        borderLayoutGuide,
+      );
+      borderRects = merged.borderRects;
+      tagRects = merged.tagRects;
+      treeLines = detectTreeLines(bin as Uint8Array, w, h, merged.rectMask);
+      treeNodes = detectNodes(bin as Uint8Array, w, h, treeLines);
+      artifacts = detectArtifacts(bin as Uint8Array, w, h, treeLines);
+    }
+
+    // ④ 装饰块与文字分流：剔除误分为黑块的文字区
+    tagRects = filterSolidGraphicRects(tagRects, bin as Uint8Array, w, h);
+    const probeChars = await api.segment(bin as Uint8Array, w, h, treeLines, borderRects);
+    tagRects = finalizeTagRects(tagRects, probeChars, bin as Uint8Array, w, h);
+
     setProgress({ stage: 'segment', percent: 50 });
-    const chars = await api.segment(
+    const segmented = await api.segment(
       bin as Uint8Array,
       w,
       h,
-      layout.treeLines,
-      [...layout.borderRects, ...layout.tagRects],
+      treeLines,
+      [...borderRects, ...tagRects],
+      borderRects,
     );
-    // 自动标定（F5.1/F5.2）：聚类字号并写回
-    const calibrated = calibratePage({ ...target, chars, calibration: { ...target.calibration, pxPerMm: target.calibration.pxPerMm } });
+    const structured = applyColumnStructure(segmented);
+    const calibrated = calibratePage(
+      { ...target, chars: structured, calibration: { ...target.calibration, pxPerMm: target.calibration.pxPerMm } },
+      undefined,
+      { data: bin as Uint8Array, width: w, height: h },
+    );
     updatePage(target.id, {
-      borderRects: layout.borderRects,
-      tagRects: layout.tagRects,
-      treeLines: layout.treeLines,
-      treeNodes: layout.treeNodes,
-      artifacts: layout.artifacts,
+      borderRects,
+      tagRects,
+      treeLines,
+      treeNodes,
+      artifacts,
+      borderLayoutGuide,
       chars: calibrated.chars,
       fontSizes: calibrated.fontSizes,
       status: 'analyzed',
     });
     setProgress({ stage: 'segment', percent: 100 });
     setMessage(
-      `分析完成：外框 ${layout.borderRects.length}，连线 ${layout.treeLines.length}，节点 ${layout.treeNodes.length}，字符 ${chars.length}`,
+      `分析完成：外框 ${borderRects.length}${borderLayoutGuide ? '（含视觉规则）' : ''}，连线 ${treeLines.length}，节点 ${treeNodes.length}，字符 ${structured.length}`,
     );
   };
 
@@ -199,10 +266,24 @@ export default function AnalyzePage() {
     const stored = await getBinaryImage(target.binaryKey);
     if (!stored) throw new Error('找不到预处理结果，无法开始识别');
     const settings = useSettingsStore.getState();
-    const { cfg, mode } = await buildProviderConfig();
-    if (mode !== 'A' && !hasConsented(mode)) {
-      throw new Error(`请先在分析页「深度识别」区同意云端识别，或在设置中保存 API Key 后重试（当前模式 ${mode}）`);
+    const mode = resolveRecognitionMode();
+    const { cfg } = await buildProviderConfig();
+    if (!isLocalRecognitionMode(mode) && !hasConsented(mode)) {
+      throw new Error('请先勾选同意云端识别，或在设置中保存 API Key');
     }
+    setRecognitionProgress({
+      totalBatches: mode === 'C' ? 10 : Math.max(1, Math.ceil(target.chars.length / 12)),
+      doneBatches: 0,
+      failedBatches: 0,
+      recognizedChars: 0,
+      totalChars: target.chars.length,
+      costCny: 0,
+      message: isLocalRecognitionMode(mode)
+        ? '本地 OCR 初始化中（首次加载字典需数十秒）…'
+        : mode === 'C'
+          ? '正在编码整页图像…'
+          : '正在识别…',
+    });
     const result = await recognizePage(
       target,
       stored.bin,
@@ -222,61 +303,55 @@ export default function AnalyzePage() {
         model: cfg.model,
         batches: result.outcome.batches,
         costEstimateCny: result.outcome.costCny,
+        settingsKey: currentRecognitionSettingsKey(),
       },
     });
     settings.addSessionCost(result.outcome.costCny);
   };
 
-  const handleRunAll = async () => {
-    if (!page || busy) return;
-    setBusy(true);
-    setMessage('');
-    setBatchProgress({ totalPages: 1, currentPageIndex: 0, phaseBase: 0 });
-    setProgress(null);
-    setRecognitionProgress(null);
-    try {
-      const bin = await runPreprocess(page);
-      if (bin) {
-        const preprocessed = useProjectStore.getState().pages.find((item) => item.id === page.id)!;
-        await runAnalyze(preprocessed, bin);
-        const analyzed = useProjectStore.getState().pages.find((item) => item.id === page.id)!;
-        if (analyzed.chars.length > 0) {
-          await runRecognition(analyzed);
-          setView('editor');
-        }
-      }
-    } catch (err) {
-      setMessage(`处理失败：${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setBusy(false);
-      setBatchProgress(null);
-    }
-  };
-
-  const workflow = [
-    { key: 'imported', label: '资料上传', hint: '原图已安全保存到本机' },
-    { key: 'preprocessed', label: '高清预处理', hint: '自动去斜、增强和去噪' },
-    { key: 'analyzed', label: '版面分析', hint: '识别外框、谱系线和节点' },
-    { key: 'recognized', label: '字符识别', hint: '完成后进入画布逐字校对' },
-    { key: 'proofread', label: '校对并输出', hint: '确认结果后交给 Scribus 排版' },
-  ] as const;
-  const statusRank: Record<string, number> = { imported: 1, preprocessed: 2, analyzed: 3, recognized: 4, proofread: 4, exported: 5 };
-  const statusStep = page ? statusRank[page.status] ?? 0 : 0;
-  const activeStep = busy
-    ? progress?.stage === 'layout' || progress?.stage === 'segment' ? 2 : 1
-    : statusStep;
-
-  /** ③ 批处理（P1 极简）：连续多页顺序处理，失败页跳过并记录（F11.1/F11.2） */
-  const handleBatch = async () => {
+  /** 批处理：顺序处理待完成页；切换识别模式后自动重跑识别阶段 */
+  const handleBatch = async (options: { force?: boolean } = {}) => {
     if (busy) return;
-    const pendingPages = pagesPendingAnalysis(pages);
+    const pendingPages = pagesForBatchProcessing(pages, recognitionSettingsKey);
     if (pendingPages.length === 0) return;
+
+    const sig = `${batchProcessingSignature(pages, recognitionSettingsKey)}:${recognitionSettingsKey}`;
+    if (!options.force && batchStartedRef.current === sig) return;
+    batchStartedRef.current = sig;
+
     setBusy(true);
-    setAutoProcessing(true);
+    setLastBatchError(null);
     setBatchQueue(pendingPages.map((p) => ({ pageId: p.id, status: 'pending' })));
     setBatchProgress({ totalPages: pendingPages.length, currentPageIndex: 0, phaseBase: 0 });
+
+    if (!isLocalRecognitionMode()) {
+      const mode = resolveRecognitionMode();
+      if (!hasConsented(mode)) {
+        const errMsg = '请先勾选同意云端识别，或在右上角设置中配置 API Key';
+        setLastBatchError(errMsg);
+        setMessage(`处理失败：${errMsg}`);
+        setBusy(false);
+        setBatchProgress(null);
+        batchStartedRef.current = '';
+        return;
+      }
+      try {
+        await buildProviderConfig();
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        setLastBatchError(errMsg);
+        setMessage(`处理失败：${errMsg}`);
+        setBusy(false);
+        setBatchProgress(null);
+        batchStartedRef.current = '';
+        return;
+      }
+    }
+
     let ok = 0;
     let fail = 0;
+    let lastError: string | null = null;
+
     for (let pageIdx = 0; pageIdx < pendingPages.length; pageIdx++) {
       const p = pendingPages[pageIdx];
       updateBatchTask(p.id, { status: 'running' });
@@ -286,109 +361,115 @@ export default function AnalyzePage() {
       setMessage(`正在处理第 ${pageIdx + 1}/${pendingPages.length} 页：${p.source.name}`);
       try {
         let analyzed = useProjectStore.getState().pages.find((x) => x.id === p.id)!;
-        const needsPipeline = analyzed.status !== 'analyzed';
+        const localMode = isLocalRecognitionMode();
+        const needsPreprocess = analyzed.status === 'imported' || !analyzed.binaryKey;
+        const needsAnalyze =
+          analyzed.status === 'imported'
+          || analyzed.status === 'preprocessed'
+          || (analyzed.status === 'analyzed' && analyzed.chars.length === 0);
+        const needsRecognition =
+          analyzed.chars.length === 0
+          || analyzed.status === 'analyzed'
+          || inferPageRecognitionSettingsKey(analyzed) !== recognitionSettingsKey;
+        const recognitionOnly = !needsPreprocess && !needsAnalyze && needsRecognition;
+
         setBatchProgress({
           totalPages: pendingPages.length,
           currentPageIndex: pageIdx,
-          phaseBase: needsPipeline ? 0 : recognitionOnlyPhaseBase(),
+          phaseBase: recognitionOnly ? recognitionOnlyPhaseBase() : 0,
         });
-        if (needsPipeline) {
-          const bin = await runPreprocess(analyzed);
-          if (!bin) throw new Error('无原图');
+
+        let bin: Uint8Array | null = null;
+        if (needsPreprocess) {
+          if (localMode) setMessage(`本地模式 · 预处理第 ${pageIdx + 1}/${pendingPages.length} 页…`);
+          bin = await runPreprocess(analyzed);
+          if (!bin) throw new Error('找不到原图，请返回导入页重新上传');
           analyzed = useProjectStore.getState().pages.find((x) => x.id === p.id)!;
+        } else if (needsAnalyze) {
+          const stored = await getBinaryImage(analyzed.binaryKey);
+          if (stored) bin = stored.bin;
+          else {
+            bin = await runPreprocess(analyzed);
+            if (!bin) throw new Error('找不到原图，请返回导入页重新上传');
+          }
+          analyzed = useProjectStore.getState().pages.find((x) => x.id === p.id)!;
+        }
+
+        if (needsAnalyze) {
+          if (!bin) {
+            const stored = await getBinaryImage(analyzed.binaryKey);
+            if (!stored) throw new Error('找不到预处理结果，请重新运行预处理');
+            bin = stored.bin;
+          }
           await runAnalyze(analyzed, bin);
           analyzed = useProjectStore.getState().pages.find((x) => x.id === p.id)!;
         }
-        if (analyzed.chars.length > 0) {
-          setMessage(`正在识别第 ${pageIdx + 1}/${pendingPages.length} 页：${p.source.name}`);
+
+        if (analyzed.chars.length > 0 && needsRecognition) {
+          setBatchProgress({
+            totalPages: pendingPages.length,
+            currentPageIndex: pageIdx,
+            phaseBase: recognitionOnly ? recognitionOnlyPhaseBase() : 0,
+          });
+          setMessage(
+            localMode
+              ? `本地 OCR 识别第 ${pageIdx + 1}/${pendingPages.length} 页（${analyzed.chars.length} 字）…`
+              : `正在识别第 ${pageIdx + 1}/${pendingPages.length} 页：${p.source.name}`,
+          );
           await runRecognition(analyzed);
+        } else if (analyzed.chars.length === 0) {
+          throw new Error('未分割到字符，请检查图像质量或手动调整分析参数');
         }
         updateBatchTask(p.id, { status: 'done' });
         ok++;
       } catch (err) {
-        updateBatchTask(p.id, { status: 'failed', error: err instanceof Error ? err.message : String(err) });
+        const errMsg = err instanceof Error ? err.message : String(err);
+        lastError = errMsg;
+        updateBatchTask(p.id, { status: 'failed', error: errMsg });
+        setMessage(`处理失败：${errMsg}`);
         fail++;
       }
     }
+
     setBatchProgress({ totalPages: pendingPages.length, currentPageIndex: pendingPages.length, phaseBase: 0 });
-    setMessage(`批处理完成：成功 ${ok} 页，失败 ${fail} 页${fail > 0 ? '（失败页可单独重试）' : ''}`);
+    if (fail > 0) {
+      setLastBatchError(lastError);
+      setMessage(`批处理完成：成功 ${ok} 页，失败 ${fail} 页（失败页可单独重试）`);
+      batchStartedRef.current = '';
+    } else {
+      setMessage(`批处理完成：成功 ${ok} 页`);
+    }
     setBusy(false);
-    setAutoProcessing(false);
     setBatchProgress(null);
     if (fail === 0) setView('editor');
   };
 
-  useEffect(() => {
-    const pending = pagesPendingAnalysis(pages);
-    if (!page || pending.length === 0) return;
-    const sig = pendingAnalysisSignature(pages);
-    if (batchStartedRef.current === sig) return;
-    batchStartedRef.current = sig;
-    void handleBatch();
-  }, [currentProjectId, pages]);
+  const retryBatch = () => {
+    batchStartedRef.current = '';
+    void handleBatch({ force: true });
+  };
 
-  /* ---------- 遮罩叠示（F3.7） ---------- */
-  const overlayData = useMemo(() => page, [page]);
+  const startWithConsent = () => {
+    grantConsent(recognizeMode);
+    retryBatch();
+  };
+
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !overlayData) return;
-    void (async () => {
-      const stored = await getBinaryImage(overlayData.binaryKey);
-      if (!stored) return;
-      const scale = Math.min(1, 900 / stored.width);
-      const w = Math.round(stored.width * scale);
-      const h = Math.round(stored.height * scale);
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d')!;
-      // 底：二值图
-      const img = binaryToImageData(stored.bin, stored.width, stored.height);
-      const tmp = document.createElement('canvas');
-      tmp.width = stored.width;
-      tmp.height = stored.height;
-      tmp.getContext('2d')!.putImageData(img, 0, 0);
-      ctx.drawImage(tmp, 0, 0, w, h);
-      // 遮罩
-      const s = scale;
-      if (masks.rects) {
-        ctx.fillStyle = MASK_COLORS.rects;
-        for (const r of overlayData.borderRects) ctx.fillRect(r.x * s, r.y * s, r.w * s, r.h * s);
-      }
-      if (masks.tags) {
-        ctx.fillStyle = MASK_COLORS.tags;
-        for (const r of overlayData.tagRects) ctx.fillRect(r.x * s, r.y * s, r.w * s, r.h * s);
-      }
-      if (masks.lines) {
-        ctx.strokeStyle = MASK_COLORS.lines;
-        for (const l of overlayData.treeLines) {
-          ctx.lineWidth = Math.max(1.5, l.widthPx * s);
-          ctx.beginPath();
-          ctx.moveTo(l.x1 * s, l.y1 * s);
-          ctx.lineTo(l.x2 * s, l.y2 * s);
-          ctx.stroke();
-        }
-      }
-      if (masks.nodes) {
-        ctx.strokeStyle = MASK_COLORS.nodes;
-        ctx.lineWidth = 2;
-        for (const n of overlayData.treeNodes) {
-          ctx.beginPath();
-          ctx.arc(n.cx * s, n.cy * s, n.r * s, 0, Math.PI * 2);
-          ctx.stroke();
-        }
-      }
-      if (masks.artifacts) {
-        ctx.strokeStyle = MASK_COLORS.artifacts;
-        ctx.lineWidth = 2;
-        for (const a of overlayData.artifacts) {
-          ctx.beginPath();
-          ctx.moveTo(a.x1 * s, a.y1 * s);
-          ctx.lineTo(a.x2 * s, a.y2 * s);
-          ctx.stroke();
-        }
-      }
-    })();
-  }, [overlayData, masks]);
+    if (pendingCount === 0) {
+      if (pages.length > 0) setView('editor');
+      return;
+    }
+    if (!page || needsCloudConsent) return;
+    void handleBatch();
+  }, [currentProjectId, pages, recognitionSettingsKey, pendingCount, needsCloudConsent]);
+
+  const overallPercent = busy
+    ? computeBatchOverallPercent(batchProgress, progress, recognitionProgress)
+    : lastBatchError
+      ? 0
+      : needsCloudConsent
+        ? 0
+        : 0;
 
   if (pages.length === 0) {
     return (
@@ -401,166 +482,62 @@ export default function AnalyzePage() {
     );
   }
 
-  if (autoProcessing || pagesPendingAnalysis(pages).length > 0) {
-    const overallPercent = computeBatchOverallPercent(batchProgress, progress, recognitionProgress);
-    const activePhase = recognitionProgress
-      ? 4
-      : progress?.stage === 'segment'
-        ? 3
-        : progress?.stage === 'layout'
-          ? 2
-          : progress
-            ? 1
-            : batchProgress && batchProgress.phaseBase >= recognitionOnlyPhaseBase()
-              ? 4
-              : 1;
-    return (
-      <div className="mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-3xl items-center justify-center px-4 py-10">
-        <div className="w-full rounded-2xl border bg-card p-6 shadow-soft sm:p-8">
-          <div className="mb-6 flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/10 text-primary">
-              <Loader2 className="h-5 w-5 animate-spin" />
-            </div>
-            <div>
-              <h1 className="text-xl font-semibold">正在处理资料</h1>
-              <p className="mt-1 text-sm text-muted-foreground">系统正在自动完成分析和识别，请不要关闭页面。</p>
-            </div>
-          </div>
-          <div className="mb-3 flex items-center justify-between gap-3 text-sm">
-            <span className="min-w-0 truncate">{message || '准备开始本地处理…'}</span>
-            <span className="shrink-0 font-medium text-primary">{Math.round(overallPercent)}%</span>
-          </div>
-          <div className="h-3 overflow-hidden rounded-full bg-secondary">
-            <div className="h-full rounded-full bg-primary transition-all duration-500" style={{ width: `${overallPercent}%` }} />
-          </div>
-          <div className="mt-6 grid gap-2 text-xs text-muted-foreground sm:grid-cols-4">
-            <span className={activePhase >= 1 ? 'text-foreground' : ''}>① 高清预处理</span>
-            <span className={activePhase >= 2 ? 'text-foreground' : ''}>② 版面分析</span>
-            <span className={activePhase >= 3 ? 'text-foreground' : ''}>③ 字符分割</span>
-            <span className={activePhase >= 4 ? 'text-foreground' : ''}>④ 深度识别与复核</span>
-          </div>
-          {recognitionProgress && (
-            <p className="mt-4 rounded-lg bg-primary/5 p-3 text-xs leading-5 text-primary">
-              正在对每个字符执行多裁剪、多方向识别和结果投票。该步骤会主动放慢处理速度，以减少断笔、粘连和异体字误判；完成后仍会把低置信字符保留在校对面板中。
-            </p>
-          )}
-          {message.startsWith('处理失败') && (
-            <Button className="mt-6" onClick={() => void handleBatch()}>重试</Button>
-          )}
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="mx-auto max-w-6xl space-y-6 p-6">
-      <div>
-        <h1 className="text-xl font-semibold">本地分析与识别</h1>
-        <p className="mt-1 text-sm text-muted-foreground">上传资料后，系统会自动使用高精度本地模式处理；你只需要等待当前步骤完成。</p>
-      </div>
-      <div className="rounded-2xl border bg-card p-4 shadow-soft">
-        <div className="grid gap-3 md:grid-cols-5">
-          {workflow.map((step, index) => {
-            const done = activeStep > index;
-            const active = activeStep === index;
-            return (
-              <div key={step.key} className="relative flex items-start gap-2 md:block">
-                <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${done ? 'bg-emerald-600 text-white' : active ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>
-                  {done ? <Check className="h-4 w-4" /> : index + 1}
-                </div>
-                <div className="md:mt-2">
-                  <p className={`text-sm font-medium ${active ? 'text-foreground' : 'text-muted-foreground'}`}>{step.label}</p>
-                  <p className="text-xs text-muted-foreground">{active && busy ? '正在处理…' : step.hint}</p>
-                </div>
-                {index < workflow.length - 1 && <ChevronRight className="absolute right-1 top-2 hidden h-4 w-4 text-muted-foreground md:block" />}
-              </div>
-            );
-          })}
-        </div>
-        <div className="mt-4 h-2 overflow-hidden rounded-full bg-secondary">
-          <div className="h-full bg-primary transition-all duration-500" style={{ width: `${Math.min(100, (activeStep / (workflow.length - 1)) * 100)}%` }} />
-        </div>
-      </div>
-      <div className="flex flex-wrap items-center gap-3">
-        <Select
-          value={page?.id ?? ''}
-          onChange={(e) => setCurrentPage(e.target.value)}
-          options={pages.map((p) => ({ value: p.id, label: `#${p.index + 1} ${p.source.name}（${p.status}）` }))}
-          className="w-72"
-          aria-label="选择页面"
-        />
-        <Button onClick={() => void handleRunAll()} disabled={busy || !page}>
-          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-          重新运行高精度本地分析
-        </Button>
-        {page && page.status === 'analyzed' && (
-          <Button variant="secondary" onClick={() => document.getElementById('recognize-step')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
-            下一步：字符识别 →
-          </Button>
-        )}
-        <Button variant="ghost" onClick={() => setView('editor')} disabled={!page || page.status === 'analyzed' || page.chars.length === 0}>
-          前往校对 →
-        </Button>
-      </div>
-
-      <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
-        {/* 固定高精度策略说明 */}
-        <div className="space-y-4 rounded-lg border bg-card p-4">
-          <div className="text-sm font-medium">高精度本地模式</div>
-          <p className="text-xs leading-5 text-muted-foreground">系统自动使用 Sauvola 局部二值化、OpenCV 增强和自动去斜。PDF 按 300 DPI 渲染；未知 DPI 的扫描图按 v7 的 10 px/mm 标定，保持网页画布与 Scribus 坐标一致。</p>
-          <div className="rounded bg-primary/5 p-3 text-xs leading-5 text-primary">本地处理：图像不会上传。系统会对每个字符进行多裁剪、多方向识别与投票复核，再进入结果画布校对。</div>
-          {page && page.calibration.pxPerMm > 0 && (
-            <div className="rounded bg-muted p-2 text-xs text-muted-foreground">
-              PX_PER_MM 已锁定：{page.calibration.pxPerMm.toFixed(3)}　去斜：
-              {page.calibration.deskewDeg.toFixed(1)}°　页面：
-              {page.calibration.pageMm[0].toFixed(1)}×{page.calibration.pageMm[1].toFixed(1)} mm
-            </div>
-          )}
-          <div>
-            <Label>遮罩开关（F3.7）</Label>
-            <div className="mt-1 space-y-1">
-              {(Object.keys(MASK_LABELS) as MaskKey[]).map((k) => (
-                <label key={k} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={masks[k]}
-                    onChange={(e) => setMasks((m) => ({ ...m, [k]: e.target.checked }))}
-                  />
-                  <span className="inline-block h-3 w-3 rounded-sm" style={{ background: MASK_COLORS[k] }} />
-                  {MASK_LABELS[k]}
-                  {k === 'rects' && page ? `（${page.borderRects.length}）` : ''}
-                  {k === 'lines' && page ? `（${page.treeLines.length}）` : ''}
-                  {k === 'nodes' && page ? `（${page.treeNodes.length}）` : ''}
-                  {k === 'tags' && page ? `（${page.tagRects.length}）` : ''}
-                  {k === 'artifacts' && page ? `（${page.artifacts.length}）` : ''}
-                </label>
-              ))}
-            </div>
+    <div className="mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-3xl items-center justify-center px-4 py-10">
+      <div className="w-full rounded-2xl border bg-card p-6 shadow-soft sm:p-8">
+        <div className="mb-6 flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/10 text-primary">
+            {busy ? <Loader2 className="h-5 w-5 animate-spin" /> : null}
           </div>
-          {progress && (
-            <div>
-              <div className="mb-1 text-xs text-muted-foreground">
-                {progress.stage === 'deskew' ? '预处理' : progress.stage === 'layout' ? '版面分析' : '字符分割'} {progress.percent}%
-              </div>
-              <div className="h-2 overflow-hidden rounded-full bg-secondary">
-                <div className="h-full bg-primary transition-all" style={{ width: `${progress.percent}%` }} />
-              </div>
+          <div>
+            <h1 className="text-xl font-semibold">{busy ? '正在处理资料' : '准备处理资料'}</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {isLocalRecognitionMode()
+                ? '本地模式：图像不出本机，完成后自动进入结果画布。'
+                : '整页图像将调用已配置的 API 识别，完成后自动进入结果画布。'}
+            </p>
+          </div>
+        </div>
+
+        {needsCloudConsent && !busy ? (
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              使用云端识别（模式 C · 整页上云）前，请确认您了解整页图像将发送至所选 API 提供商。
+            </p>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={consentChecked}
+                onChange={(e) => setConsentChecked(e.target.checked)}
+              />
+              我已了解并同意本次会话使用云端识别
+            </label>
+            <Button disabled={!consentChecked} onClick={startWithConsent}>
+              同意并开始
+            </Button>
+          </div>
+        ) : (
+          <>
+            <div className="mb-3 flex items-center justify-between gap-3 text-sm">
+              <span className="min-w-0 truncate">
+                {message || (busy ? '正在自动分析和识别…' : lastBatchError ? `处理失败：${lastBatchError}` : '等待开始…')}
+              </span>
+              {busy && <span className="shrink-0 font-medium text-primary">{Math.round(overallPercent)}%</span>}
             </div>
-          )}
-          {message && <p className="text-xs text-muted-foreground">{message}</p>}
-        </div>
-
-        {/* 预览画布 */}
-        <div className="overflow-auto rounded-lg border bg-muted/30 p-2">
-          <canvas ref={canvasRef} className="mx-auto max-w-full" aria-label="分析结果遮罩预览" />
-          {!page?.binaryKey && (
-            <p className="p-10 text-center text-sm text-muted-foreground">尚未预处理。点击上方「运行」开始本地分析。</p>
-          )}
-        </div>
+            {busy && (
+              <div className="h-3 overflow-hidden rounded-full bg-secondary">
+                <div className="h-full rounded-full bg-primary transition-all duration-300" style={{ width: `${overallPercent}%` }} />
+              </div>
+            )}
+            {lastBatchError && !busy && (
+              <Button className="mt-4" onClick={retryBatch}>
+                重试
+              </Button>
+            )}
+          </>
+        )}
       </div>
-
-      {/* 识别（模式 A/B/C） */}
-      {page && page.chars.length > 0 && <RecognizePanel page={page} />}
     </div>
   );
 }

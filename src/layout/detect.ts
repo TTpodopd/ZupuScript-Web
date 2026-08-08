@@ -12,6 +12,7 @@ import {
   MIN_LINE_LEN,
 } from '@/lib/constants';
 import { connectedComponents } from '@/imaging/raster';
+import { isSolidGraphicBlock } from '@/layout/graphicBlock';
 import type { BorderRect, TagRect, TreeLine } from '@/model/types';
 import { uuid } from '@/lib/utils';
 
@@ -152,40 +153,301 @@ function appendRectIfDistinct(
   rects.push(rect);
 }
 
-/** 扫描页边区域的墨迹，补回 PDF 矢量细页框（约 1pt） */
-function detectPageOutlineFrame(
+function maxBorderBarThickness(pageW: number, pageH: number): number {
+  return Math.max(12, Math.round(Math.min(pageW, pageH) * 0.065));
+}
+
+function pageEdgePad(pageW: number, pageH: number): number {
+  return Math.max(16, Math.round(Math.min(pageW, pageH) * 0.12));
+}
+
+function isNearPageEdge(
+  width: number,
+  height: number,
+  rect: Pick<BorderRect, 'x' | 'y' | 'w' | 'h'>,
+): boolean {
+  const pad = pageEdgePad(width, height);
+  return (
+    rect.x < pad ||
+    rect.y < pad ||
+    rect.x + rect.w > width - pad ||
+    rect.y + rect.h > height - pad
+  );
+}
+
+function countInkInRect(
   bin: Uint8Array,
   width: number,
   height: number,
-): BorderRect | null {
-  const strip = Math.max(24, Math.round(Math.min(width, height) * 0.045));
-  let minX = width;
-  let minY = height;
-  let maxX = 0;
-  let maxY = 0;
-  let found = false;
+  rect: Pick<BorderRect, 'x' | 'y' | 'w' | 'h'>,
+): number {
+  const x0 = Math.max(0, Math.floor(rect.x));
+  const y0 = Math.max(0, Math.floor(rect.y));
+  const x1 = Math.min(width, Math.ceil(rect.x + rect.w));
+  const y1 = Math.min(height, Math.ceil(rect.y + rect.h));
+  let ink = 0;
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) ink += bin[y * width + x];
+  }
+  return ink;
+}
 
-  const scan = (y0: number, y1: number, x0: number, x1: number) => {
-    for (let y = y0; y < y1; y += 1) {
-      for (let x = x0; x < x1; x += 1) {
-        if (!bin[y * width + x]) continue;
-        found = true;
-        minX = Math.min(minX, x);
-        minY = Math.min(minY, y);
-        maxX = Math.max(maxX, x);
-        maxY = Math.max(maxY, y);
+function inkFillRatio(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  rect: Pick<BorderRect, 'x' | 'y' | 'w' | 'h'>,
+): number {
+  const area = Math.max(1, rect.w * rect.h);
+  return countInkInRect(bin, width, height, rect) / area;
+}
+
+/** 长条方向上的墨迹覆盖（竖条看行、横条看列） */
+function barSpanCoverage(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  rect: Pick<BorderRect, 'x' | 'y' | 'w' | 'h'>,
+): number {
+  const x0 = Math.max(0, Math.floor(rect.x));
+  const y0 = Math.max(0, Math.floor(rect.y));
+  const x1 = Math.min(width, Math.ceil(rect.x + rect.w));
+  const y1 = Math.min(height, Math.ceil(rect.y + rect.h));
+  if (rect.w >= rect.h * 2) {
+    let cols = 0;
+    for (let x = x0; x < x1; x += 1) {
+      for (let y = y0; y < y1; y += 1) {
+        if (bin[y * width + x]) {
+          cols += 1;
+          break;
+        }
       }
     }
+    return cols / Math.max(1, x1 - x0);
+  }
+  let rows = 0;
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) {
+      if (bin[y * width + x]) {
+        rows += 1;
+        break;
+      }
+    }
+  }
+  return rows / Math.max(1, y1 - y0);
+}
+
+/** 检测阶段：墨迹密度 + 条带形态，过滤空白页边误检 */
+export function isPlausibleBorderBar(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  rect: Pick<BorderRect, 'x' | 'y' | 'w' | 'h'>,
+): boolean {
+  const shortSide = Math.min(rect.w, rect.h);
+  const longSide = Math.max(rect.w, rect.h);
+  const aspect = longSide / Math.max(1, shortSide);
+  const maxThickness = maxBorderBarThickness(width, height);
+  const fill = inkFillRatio(bin, width, height, rect);
+  const span = barSpanCoverage(bin, width, height, rect);
+  const nearEdge = isNearPageEdge(width, height, rect);
+
+  if (fill < 0.28) return false;
+  if (aspect >= 2.5 && span < 0.48) return false;
+
+  const pageArea = width * height;
+  const area = rect.w * rect.h;
+  if (area > pageArea * 0.12) {
+    if (shortSide > maxThickness || fill < 0.5) return false;
+  }
+
+  // 页边高填充实心框（扫描/PDF 均适用）
+  if (nearEdge && fill >= 0.4 && aspect >= 2.8 && shortSide <= maxThickness) return true;
+  // 细页框
+  if (aspect >= 4 && shortSide <= maxThickness && fill >= 0.32) return true;
+  // 较厚装饰边条
+  if (aspect >= 5 && shortSide >= Math.max(8, Math.round(Math.min(width, height) * 0.004)) && fill >= 0.48) {
+    return true;
+  }
+  return shortSide <= maxThickness && aspect >= 3 && fill >= 0.42;
+}
+
+/** 渲染阶段：面积过大且不够「细条」时只描边不填黑（避免整页涂黑） */
+export function isRenderableSolidBorderRect(
+  rect: Pick<BorderRect, 'w' | 'h'>,
+  pageW: number,
+  pageH: number,
+): boolean {
+  const area = rect.w * rect.h;
+  const pageArea = pageW * pageH;
+  if (area <= pageArea * 0.12) return true;
+  const minDim = Math.min(rect.w, rect.h);
+  return minDim <= maxBorderBarThickness(pageW, pageH);
+}
+
+function appendBorderRectIfValid(
+  rects: BorderRect[],
+  rect: BorderRect,
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  tolerance = { x: 8, y: 8, w: 16, h: 16 },
+): boolean {
+  if (!isPlausibleBorderBar(bin, width, height, rect)) return false;
+  if (!isRenderableSolidBorderRect(rect, width, height)) return false;
+  const before = rects.length;
+  appendRectIfDistinct(rects, rect, tolerance);
+  return rects.length > before;
+}
+
+function isFlushWithPageEdge(
+  width: number,
+  height: number,
+  rect: Pick<BorderRect, 'x' | 'y' | 'w' | 'h'>,
+): boolean {
+  const tol = 4;
+  const touchesTop = rect.y <= tol;
+  const touchesBottom = rect.y + rect.h >= height - tol;
+  const touchesLeft = rect.x <= tol;
+  const touchesRight = rect.x + rect.w >= width - tol;
+  if (rect.w >= rect.h * 2) return touchesTop || touchesBottom;
+  if (rect.h >= rect.w * 2) return touchesLeft || touchesRight;
+  return touchesTop || touchesBottom || touchesLeft || touchesRight;
+}
+
+/** 单轴开运算 + 页边位置约束，检出扫描件厚页框（横纵交集会漏掉短边 < 80px 的实心条） */
+function detectSolidFrameBars(bin: Uint8Array, width: number, height: number): BorderRect[] {
+  const vMinRun = Math.max(MIN_LINE_LEN, Math.round(height * 0.48));
+  const hMinRun = Math.max(MIN_LINE_LEN, Math.round(width * 0.48));
+  const edgePad = pageEdgePad(width, height);
+  const maxThick = maxBorderBarThickness(width, height);
+  const bars: BorderRect[] = [];
+
+  const consider = (box: { x: number; y: number; w: number; h: number }, orient: 'h' | 'v') => {
+    const shortSide = orient === 'v' ? box.w : box.h;
+    const longSide = orient === 'v' ? box.h : box.w;
+    if (shortSide < 2 || shortSide > maxThick) return;
+    if (longSide < (orient === 'v' ? height : width) * 0.46) return;
+    const nearEdge =
+      orient === 'v'
+        ? box.x < edgePad || box.x + box.w > width - edgePad
+        : box.y < edgePad || box.y + box.h > height - edgePad;
+    if (!nearEdge) return;
+    const rect: BorderRect = { id: uuid(), x: box.x, y: box.y, w: box.w, h: box.h };
+    if (!isPlausibleBorderBar(bin, width, height, rect)) return;
+    appendRectIfDistinct(bars, rect);
   };
 
-  scan(0, strip, 0, width);
-  scan(height - strip, height, 0, width);
-  scan(0, height, 0, strip);
-  scan(0, height, width - strip, width);
+  const vOpen = openingByRunLength(bin, width, height, 'v', vMinRun);
+  for (const box of connectedComponents(vOpen, width, height).boxes) consider(box, 'v');
 
-  if (!found) return null;
-  if (maxX - minX < width * 0.35 || maxY - minY < height * 0.35) return null;
-  return { id: uuid(), x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+  const hOpen = openingByRunLength(bin, width, height, 'h', hMinRun);
+  for (const box of connectedComponents(hOpen, width, height).boxes) consider(box, 'h');
+
+  return bars;
+}
+
+/** 在页边窄带内按列/行剖面提取紧凑条框，避免把整个扫描带当作边框 */
+function extractBarFromStripProfile(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  axis: 'h' | 'v',
+  start: number,
+  end: number,
+  anchor: 'min' | 'max',
+): BorderRect | null {
+  const maxThick = maxBorderBarThickness(width, height);
+  const minSpan = axis === 'v' ? height * 0.52 : width * 0.52;
+
+  type SliceStat = { i: number; spanLen: number; fill: number; inkMin: number; inkMax: number };
+  const slices: SliceStat[] = [];
+
+  if (axis === 'v') {
+    for (let x = start; x < end; x += 1) {
+      let rows = 0;
+      let ink = 0;
+      let minY = height;
+      let maxY = 0;
+      for (let y = 0; y < height; y += 1) {
+        if (!bin[y * width + x]) continue;
+        rows += 1;
+        ink += 1;
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+      }
+      if (rows === 0) continue;
+      const spanLen = maxY - minY + 1;
+      if (spanLen < minSpan) continue;
+      slices.push({ i: x, spanLen, fill: ink / spanLen, inkMin: minY, inkMax: maxY });
+    }
+  } else {
+    for (let y = start; y < end; y += 1) {
+      let cols = 0;
+      let ink = 0;
+      let minX = width;
+      let maxX = 0;
+      for (let x = 0; x < width; x += 1) {
+        if (!bin[y * width + x]) continue;
+        cols += 1;
+        ink += 1;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+      }
+      if (cols === 0) continue;
+      const spanLen = maxX - minX + 1;
+      if (spanLen < minSpan) continue;
+      slices.push({ i: y, spanLen, fill: ink / spanLen, inkMin: minX, inkMax: maxX });
+    }
+  }
+
+  if (!slices.length) return null;
+
+  const runs: Array<{ start: number; end: number; slices: SliceStat[] }> = [];
+  let runStart = slices[0].i;
+  let runSlices: SliceStat[] = [slices[0]];
+  for (let idx = 1; idx < slices.length; idx += 1) {
+    if (slices[idx].i === slices[idx - 1].i + 1) {
+      runSlices.push(slices[idx]);
+    } else {
+      runs.push({ start: runStart, end: slices[idx - 1].i + 1, slices: runSlices });
+      runStart = slices[idx].i;
+      runSlices = [slices[idx]];
+    }
+  }
+  runs.push({ start: runStart, end: runSlices[runSlices.length - 1].i + 1, slices: runSlices });
+
+  const pick =
+    anchor === 'min'
+      ? runs.sort((a, b) => a.start - b.start)[0]
+      : runs.sort((a, b) => b.end - a.end)[0];
+  if (!pick || pick.end - pick.start > maxThick) return null;
+
+  const inkMin = Math.min(...pick.slices.map((s) => s.inkMin));
+  const inkMax = Math.max(...pick.slices.map((s) => s.inkMax));
+  if (axis === 'v') {
+    return { id: uuid(), x: pick.start, y: inkMin, w: pick.end - pick.start, h: inkMax - inkMin + 1 };
+  }
+  return { id: uuid(), x: inkMin, y: pick.start, w: inkMax - inkMin + 1, h: pick.end - pick.start };
+}
+
+/** 扫描页边窄带，提取 PDF 细页框与内缩厚页框 */
+function detectPageOutlineBars(bin: Uint8Array, width: number, height: number): BorderRect[] {
+  const strip = Math.max(24, Math.round(Math.min(width, height) * 0.12));
+  const bars: BorderRect[] = [];
+
+  const tryBar = (bar: BorderRect | null) => {
+    if (!bar) return;
+    if (!isFlushWithPageEdge(width, height, bar)) return;
+    if (!isPlausibleBorderBar(bin, width, height, bar)) return;
+    appendRectIfDistinct(bars, { ...bar, id: uuid() });
+  };
+
+  tryBar(extractBarFromStripProfile(bin, width, height, 'h', 0, strip, 'min'));
+  tryBar(extractBarFromStripProfile(bin, width, height, 'h', height - strip, height, 'max'));
+  tryBar(extractBarFromStripProfile(bin, width, height, 'v', 0, strip, 'min'));
+  tryBar(extractBarFromStripProfile(bin, width, height, 'v', width - strip, width, 'max'));
+  return bars;
 }
 
 /**
@@ -206,16 +468,18 @@ export function detectRects(bin: Uint8Array, width: number, height: number): Rec
   const tagRects: TagRect[] = [];
   const rectMask = new Uint8Array(bin.length);
 
-  const outline = detectPageOutlineFrame(bin, width, height);
-  if (outline) {
-    appendRectIfDistinct(borderRects, outline);
-    markRectMask(rectMask, width, height, outline);
-  }
+  const addBars = (bars: BorderRect[]) => {
+    for (const bar of bars) {
+      appendRectIfDistinct(borderRects, bar);
+      markRectMask(rectMask, width, height, bar);
+    }
+  };
 
-  // 页面外框通常占据整行/整列的大部分墨迹，投影检测比粗块连通域更稳健，
-  // 也能避免把边框拆成大量“谱系线”。
+  addBars(detectSolidFrameBars(bin, width, height));
+  addBars(detectPageOutlineBars(bin, width, height));
+
   const edgeMargin = (axis: 'h' | 'v') =>
-    axis === 'h' ? Math.max(12, Math.round(height * 0.03)) : Math.max(12, Math.round(width * 0.03));
+    axis === 'h' ? Math.max(16, Math.round(height * 0.1)) : Math.max(16, Math.round(width * 0.1));
   const isEdgeBand = (axis: 'h' | 'v', band: { start: number; end: number }) => {
     const margin = edgeMargin(axis);
     const span = axis === 'h' ? height : width;
@@ -228,6 +492,8 @@ export function detectRects(bin: Uint8Array, width: number, height: number): Rec
 
   const addProjectionBorder = (axis: 'h' | 'v', band: { start: number; end: number }) => {
     const atEdge = isEdgeBand(axis, band);
+    // 投影只补页边实心框；正文列/行高覆盖带不能当作边框
+    if (!atEdge) return;
     const minThickness = minBandThickness(atEdge);
     if (band.end - band.start < minThickness) return;
     let minX = width;
@@ -243,12 +509,13 @@ export function detectRects(bin: Uint8Array, width: number, height: number): Rec
     }
     if (maxX <= minX || maxY <= minY) return;
     const rect = { id: uuid(), x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
-    appendRectIfDistinct(borderRects, rect);
-    markRectMask(rectMask, width, height, rect);
+    if (appendBorderRectIfValid(borderRects, rect, bin, width, height)) {
+      markRectMask(rectMask, width, height, rect);
+    }
   };
-  // 投影只用于补回覆盖整页的大实心边条；细线由 detectTreeLines 负责。
-  for (const band of projectionBands(bin, width, height, 'h', 0.82)) addProjectionBorder('h', band);
-  for (const band of projectionBands(bin, width, height, 'v', 0.82)) addProjectionBorder('v', band);
+  // 投影补漏：页边高覆盖带（阈值略低以兼容厚框内缘）
+  for (const band of projectionBands(bin, width, height, 'h', 0.72)) addProjectionBorder('h', band);
+  for (const band of projectionBands(bin, width, height, 'v', 0.72)) addProjectionBorder('v', band);
   for (const b of boxes) {
     const longSide = Math.max(b.w, b.h);
     const shortSide = Math.min(b.w, b.h);
@@ -257,10 +524,16 @@ export function detectRects(bin: Uint8Array, width: number, height: number): Rec
     const minSolidThickness = Math.max(8, Math.round(Math.min(width, height) * 0.004));
     // 长宽比只说明“像线”，不能说明“是实心边条”。厚度门槛专门排除谱系细线。
     const isBorder = aspect >= 5 && longSide >= 150 && shortSide >= minSolidThickness && fillRatio >= 0.55;
-    const isTag = !isBorder && b.w >= 30 && b.h >= 30 && fillRatio >= 0.55 && b.area >= 1200;
-    if (!isBorder && !isTag) continue;
     const entry = { id: uuid(), x: b.x, y: b.y, w: b.w, h: b.h };
-    if (isBorder) appendRectIfDistinct(borderRects, entry);
+    const isTag =
+      !isBorder &&
+      b.w >= 30 &&
+      b.h >= 30 &&
+      fillRatio >= 0.58 &&
+      b.area >= 1200 &&
+      isSolidGraphicBlock(bin, width, height, entry);
+    if (!isBorder && !isTag) continue;
+    if (isBorder) appendBorderRectIfValid(borderRects, entry, bin, width, height);
     else tagRects.push(entry);
     // 掩码标记
     for (let i = 0; i < labels.length; i++) {

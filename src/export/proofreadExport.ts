@@ -16,7 +16,9 @@ function pageSizeMm(page: Page): [number, number] {
 
 /** 渲染不含选框、低置信标记和操作提示的干净成果画布。 */
 export async function renderProofreadCanvas(page: Page): Promise<HTMLCanvasElement> {
-  if ('fonts' in document) await document.fonts.ready;
+  if ('fonts' in document) {
+    await Promise.race([document.fonts.ready, new Promise<void>((r) => window.setTimeout(r, 3000))]);
+  }
   const canvas = document.createElement('canvas');
   renderPreviewToCanvas(page, canvas);
   return canvas;
@@ -60,10 +62,15 @@ export function revokeObjectUrls(urls: Iterable<string>): void {
   }
 }
 
-function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number): Promise<Blob> {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('成果图编码失败'))), type, quality);
-  });
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number, timeoutMs = 90_000): Promise<Blob> {
+  return Promise.race([
+    new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('成果图编码失败'))), type, quality);
+    }),
+    new Promise<Blob>((_, reject) => {
+      window.setTimeout(() => reject(new Error('成果图编码超时，请尝试导出 PDF 后打印')), timeoutMs);
+    }),
+  ]);
 }
 
 /** 生成校对成果 PDF Blob（不含任何页眉页脚，仅页面图像）。 */
@@ -109,6 +116,43 @@ async function waitForDocumentImages(doc: Document): Promise<void> {
   );
 }
 
+/** 弹出打印对话框后尽快返回，避免 afterprint 不触发导致 UI 一直转圈。 */
+function openPrintDialog(win: Window): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    win.addEventListener('afterprint', finish, { once: true });
+    try {
+      const mql = win.matchMedia('print');
+      const onPrintChange = () => {
+        if (!mql.matches) {
+          mql.removeEventListener('change', onPrintChange);
+          finish();
+        }
+      };
+      mql.addEventListener('change', onPrintChange);
+    } catch {
+      /* matchMedia 不可用 */
+    }
+
+    win.focus();
+    win.print();
+    window.setTimeout(finish, 1200);
+  });
+}
+
+function schedulePrintCleanup(iframe: HTMLIFrameElement, imageUrls: string[], delayMs = 60_000): void {
+  window.setTimeout(() => {
+    revokeObjectUrls(imageUrls);
+    iframe.remove();
+  }, delayMs);
+}
+
 /** 调用系统打印对话框；隐藏 iframe + 全分辨率图像，不另开标签页。 */
 export async function printProofreadPages(
   pages: Page[],
@@ -121,10 +165,10 @@ export async function printProofreadPages(
 
   const iframe = document.createElement('iframe');
   iframe.setAttribute('aria-hidden', 'true');
-  iframe.style.cssText = 'position:fixed;left:-10000px;top:0;width:1px;height:1px;border:0;visibility:hidden';
+  iframe.style.cssText = 'position:fixed;left:-10000px;top:0;width:1024px;height:768px;border:0;visibility:hidden';
   document.body.appendChild(iframe);
 
-  const cleanup = () => {
+  const cleanupNow = () => {
     revokeObjectUrls(imageUrls);
     iframe.remove();
   };
@@ -132,9 +176,10 @@ export async function printProofreadPages(
   try {
     for (let index = 0; index < sorted.length; index += 1) {
       const canvas = await renderProofreadCanvas(sorted[index]);
-      const blob = await canvasToBlob(canvas, 'image/png');
+      const blob = await canvasToBlob(canvas, 'image/jpeg', 0.92);
       imageUrls.push(URL.createObjectURL(blob));
       onProgress?.(index + 1, sorted.length);
+      await new Promise<void>((r) => window.setTimeout(r, 0));
     }
 
     const doc = iframe.contentDocument;
@@ -175,22 +220,11 @@ export async function printProofreadPages(
     doc.close();
 
     await waitForDocumentImages(doc);
-
-    await new Promise<void>((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        win.removeEventListener('afterprint', finish);
-        resolve();
-      };
-      win.addEventListener('afterprint', finish, { once: true });
-      win.focus();
-      win.print();
-      window.setTimeout(finish, 60_000);
-    });
-  } finally {
-    cleanup();
+    await openPrintDialog(win);
+    schedulePrintCleanup(iframe, imageUrls);
+  } catch (error) {
+    cleanupNow();
+    throw error;
   }
 }
 

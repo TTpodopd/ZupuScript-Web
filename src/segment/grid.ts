@@ -276,24 +276,58 @@ export function hashBatch(chars: CharItem[], batchIndex: number): string {
 
 /** 整页二值图 → PNG base64（C 模式整页上行） */
 export async function pageBinaryToPngBase64(bin: Uint8Array, width: number, height: number): Promise<string> {
+  return pageBinaryToPngBase64Downscaled(bin, width, height, Math.max(width, height));
+}
+
+/** 整页二值图 → 限长边 PNG base64（版面视觉分析等轻量上行） */
+export async function pageBinaryToPngBase64Downscaled(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  maxEdge: number,
+): Promise<string> {
+  const longest = Math.max(width, height);
+  const scale = longest > maxEdge ? maxEdge / longest : 1;
+  const outW = Math.max(1, Math.round(width * scale));
+  const outH = Math.max(1, Math.round(height * scale));
+
   let canvas: HTMLCanvasElement | OffscreenCanvas;
   if (typeof OffscreenCanvas !== 'undefined') {
-    canvas = new OffscreenCanvas(width, height);
+    canvas = new OffscreenCanvas(outW, outH);
   } else {
     const c = document.createElement('canvas');
-    c.width = width;
-    c.height = height;
+    c.width = outW;
+    c.height = outH;
     canvas = c;
   }
   const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
-  const img = ctx.createImageData(width, height);
-  for (let i = 0, j = 0; j < bin.length; i += 4, j++) {
-    const v = bin[j] ? 0 : 255;
-    img.data[i] = v;
-    img.data[i + 1] = v;
-    img.data[i + 2] = v;
-    img.data[i + 3] = 255;
+  if (scale >= 0.999) {
+    const img = ctx.createImageData(width, height);
+    for (let i = 0, j = 0; j < bin.length; i += 4, j += 1) {
+      const v = bin[j] ? 0 : 255;
+      img.data[i] = v;
+      img.data[i + 1] = v;
+      img.data[i + 2] = v;
+      img.data[i + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  } else {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, outW, outH);
+    const img = ctx.createImageData(outW, outH);
+    for (let y = 0; y < outH; y += 1) {
+      const sy = Math.min(height - 1, Math.floor(y / scale));
+      for (let x = 0; x < outW; x += 1) {
+        const sx = Math.min(width - 1, Math.floor(x / scale));
+        const v = bin[sy * width + sx] ? 0 : 255;
+        const o = (y * outW + x) * 4;
+        img.data[o] = v;
+        img.data[o + 1] = v;
+        img.data[o + 2] = v;
+        img.data[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
   }
-  ctx.putImageData(img, 0, 0);
   return canvasToPngBase64(canvas);
 }

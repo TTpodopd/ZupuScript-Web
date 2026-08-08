@@ -1,13 +1,10 @@
 /**
- * 识别面板（F4.x）：模式 A/B/C、Provider 选择、成本预估（F4.9）、
- * 上行拼图预览（P1.3）、首次云端同意弹窗（P1.1）、实时进度。
- * 唯一出网点为 recognize/orchestrator.ts。
+ * 识别面板（F4.x）：模式 A/C、Provider 选择、成本预估、首次云端同意弹窗、实时进度。
  */
 import { useState } from 'react';
-import { Eye, Loader2, Play, ShieldCheck } from 'lucide-react';
+import { Loader2, Play, ShieldCheck } from 'lucide-react';
 import { Button } from '@/ui/components/ui/button';
 import { Input, Label } from '@/ui/components/ui/input';
-import { Select } from '@/ui/components/ui/select';
 import {
   Dialog,
   DialogContent,
@@ -16,17 +13,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/ui/components/ui/dialog';
-import { CONFIDENCE_THRESHOLD, GRID_BATCH_SIZE } from '@/lib/constants';
-import type { Page, PrivacyMode } from '@/model/types';
+import { CONFIDENCE_THRESHOLD } from '@/lib/constants';
+import type { Page } from '@/model/types';
 import { grantConsent, hasConsented, isForcedLocal } from '@/privacy/consent';
-import { buildProviderConfig } from '@/recognize/buildConfig';
+import { buildProviderConfig, currentRecognitionSettingsKey, isLocalRecognitionMode, resolveRecognitionMode } from '@/recognize/buildConfig';
 import { saveApiKey } from '@/privacy/keystore';
 import { getBinaryImage } from '@/storage/opfs';
 import { useProjectStore } from '@/store/projectStore';
 import { useSettingsStore } from '@/store/settingsStore';
 import { getProvider, providerDomain, recognizePage } from '@/recognize/orchestrator';
 import type { RecognizeProgress } from '@/recognize/types';
-import { buildGridBatch } from '@/segment/grid';
 
 export default function RecognizePanel({ page }: { page: Page }) {
   const { updatePage } = useProjectStore();
@@ -41,17 +37,19 @@ export default function RecognizePanel({ page }: { page: Page }) {
   const [progress, setProgress] = useState<RecognizeProgress | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
-  const mode = settings.privacyMode;
+  const mode = resolveRecognitionMode();
+  const localMode = isLocalRecognitionMode(mode);
   const connection = settings.activeConnection();
-  const model = connection?.models.find((m) => m.id === settings.activeModelId);
-  const providerId = connection?.provider ?? settings.provider.provider;
+  const model = localMode
+    ? { id: 'local-tesseract', name: 'Tesseract（chi_tra）' }
+    : connection?.models.find((m) => m.id === settings.activeModelId);
+  const providerId = localMode ? 'local' : (connection?.provider ?? settings.provider.provider);
   const provider = providerId === 'local' ? null : getProvider(providerId);
   const lowConfCount = page.chars.filter((c) => c.conf < CONFIDENCE_THRESHOLD && c.source !== 'manual').length;
 
-  /** 成本预估（F4.9：调用前预估） */
-  const estimate = provider && mode !== 'A' ? provider.estimateCost(page.chars.length) * (mode === 'C' ? 6 : 2) : 0;
+  /** 成本预估（远端统一模式 C：整页上云） */
+  const estimate = provider && !localMode ? provider.estimateCost(page.chars.length) * 6 : 0;
 
   const buildConfig = () => buildProviderConfig(passphrase || undefined, apiKeyInput);
 
@@ -82,6 +80,7 @@ export default function RecognizePanel({ page }: { page: Page }) {
           model: cfg.model,
           batches: outcome.batches,
           costEstimateCny: outcome.costCny,
+          settingsKey: currentRecognitionSettingsKey(),
         },
       });
       settings.addSessionCost(outcome.costCny);
@@ -96,26 +95,18 @@ export default function RecognizePanel({ page }: { page: Page }) {
   };
 
   const handleStart = () => {
-    if (mode !== 'A' && !hasConsented(mode)) {
+    if (!localMode && !hasConsented(mode)) {
       setConsentOpen(true); // P1.1 首次云端识别弹窗
       return;
     }
     void doRecognize();
   };
 
-  /** 上行内容预览（P1.3）：发送前查看实际将要上传的第一张拼图 */
-  const handlePreviewGrid = async () => {
-    const stored = await getBinaryImage(page.binaryKey);
-    if (!stored || page.chars.length === 0) return;
-    const batch = await buildGridBatch(page.chars.slice(0, GRID_BATCH_SIZE), stored.bin, stored.width, stored.height, 0);
-    setPreviewUrl(`data:image/png;base64,${batch.imageBase64Png}`);
-  };
-
   const handleSaveKey = async () => {
     if (!apiKeyInput.trim()) return;
     try {
       await saveApiKey(connection?.id ?? providerId, apiKeyInput.trim(), passphrase || undefined, sessionOnly);
-      if (!sessionOnly && mode !== 'A') grantConsent(mode);
+      if (!sessionOnly && !localMode) grantConsent(mode);
       setMessage(sessionOnly ? '密钥已保存（仅本次会话）' : '密钥已加密保存到本机，刷新后自动加载');
       setApiKeyInput('');
     } catch (err) {
@@ -133,21 +124,14 @@ export default function RecognizePanel({ page }: { page: Page }) {
       <div className="grid gap-4 md:grid-cols-2">
         <div className="space-y-3">
           <div>
-            <Label>隐私模式（PRD 7.2）</Label>
-            <Select
-              value={mode}
-              onChange={(e) => settings.setPrivacyMode(e.target.value as PrivacyMode)}
-              disabled={forcedLocal}
-              options={[
-                { value: 'A', label: 'A · 全本地（Tesseract，图像不出本机）' },
-                { value: 'B', label: 'B · 字符拼图上云（默认，最小上行）' },
-                { value: 'C', label: 'C · 整页上云（难页/污损页，准确率最高）' },
-              ]}
-            />
+            <Label>识别模式</Label>
+            <p className="mt-1 rounded-md bg-muted px-3 py-2 text-sm">
+              {localMode ? 'A · 全本地（Tesseract，图像不出本机）' : 'C · 整页上云（远端统一模式，准确率最高）'}
+            </p>
             {forcedLocal && <p className="mt-1 text-xs text-destructive">当前部署已锁定全本地模式（P1.7）</p>}
           </div>
 
-          {mode !== 'A' && (
+          {!localMode && (
             <>
               <div className="rounded-lg border bg-muted/40 p-3 md:col-span-2">
                 <div className="flex items-center justify-between gap-2">
@@ -185,7 +169,7 @@ export default function RecognizePanel({ page }: { page: Page }) {
             <div>预估成本：约 ¥{estimate.toFixed(3)}（单页上限 ¥{settings.pageBudgetCny}）</div>
             <div className="mt-1 text-xs text-muted-foreground">
               本次会话累计：¥{settings.sessionCostCny.toFixed(3)}（项目上限 ¥{settings.projectBudgetCny}）
-              {provider && mode !== 'A' ? `　目标域名：${providerDomain(provider, { provider: providerId, model: '', concurrency: 1, timeoutMs: 0, maxRetries: 0, endpoint: settings.provider.endpoint || undefined, proxyUrl: settings.provider.proxyUrl || undefined })}` : ''}
+              {provider && !localMode ? `　目标域名：${providerDomain(provider, { provider: providerId, model: '', concurrency: 1, timeoutMs: 0, maxRetries: 0, endpoint: settings.provider.endpoint || undefined, proxyUrl: settings.provider.proxyUrl || undefined })}` : ''}
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -193,11 +177,6 @@ export default function RecognizePanel({ page }: { page: Page }) {
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
               开始识别
             </Button>
-            {mode === 'B' && (
-              <Button variant="outline" onClick={() => void handlePreviewGrid()}>
-                <Eye className="h-4 w-4" /> 预览上行拼图
-              </Button>
-            )}
           </div>
           {progress && (
             <div>
@@ -221,12 +200,6 @@ export default function RecognizePanel({ page }: { page: Page }) {
               初次识别和模型输出校验已完成。两轮不一致的字符已自动降低置信度，请在结果画布中重点确认。
             </div>
           )}
-          {previewUrl && (
-            <div>
-              <Label>将要上传的拼图（编号已打乱，无版面无上下文）</Label>
-              <img src={previewUrl} alt="上行拼图预览" className="mt-1 max-h-64 rounded border" />
-            </div>
-          )}
         </div>
       </div>
 
@@ -236,9 +209,7 @@ export default function RecognizePanel({ page }: { page: Page }) {
           <DialogHeader>
             <DialogTitle>云端识别隐私告知</DialogTitle>
             <DialogDescription>
-              {mode === 'B'
-                ? '字符拼图上云：仅上传二值化单字小图拼成的编号网格图（顺序已打乱），不含版面、上下文与文件名。'
-                : '整页上云：整页图像将发送给大模型厂商，准确率最高但隐私暴露面最大。'}
+              整页上云：整页图像将发送给大模型厂商进行识别，准确率最高。除此次识别外，图像与项目数据不会离开本机。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2 text-sm">

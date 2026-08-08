@@ -128,9 +128,57 @@ export function pagesPendingAnalysis(pages: Page[]): Page[] {
   return pages.filter((p) => p.status === 'imported' || p.status === 'preprocessed' || p.status === 'analyzed');
 }
 
+/** 切换识别模式后需重新 OCR 的页面（已有分割结果） */
+export function pageHasPoorRecognition(page: Page): boolean {
+  if (page.chars.length < 8) return false;
+  if (page.status !== 'recognized' && page.status !== 'proofread' && page.status !== 'exported') return false;
+  const empty = page.chars.filter((c) => !c.text?.trim()).length;
+  return empty / page.chars.length >= 0.25;
+}
+
+export function pagesNeedingReRecognition(pages: Page[], recognitionSettingsKey: string): Page[] {
+  return pages.filter((p) => {
+    if (p.chars.length === 0) return false;
+    if (p.status !== 'recognized' && p.status !== 'proofread' && p.status !== 'exported') return false;
+    if (pageHasPoorRecognition(p)) return true;
+    const stored = inferPageRecognitionSettingsKey(p);
+    if (!stored) return false;
+    return stored !== recognitionSettingsKey;
+  });
+}
+
+/** 从 recognition 元数据推断设置签名（兼容旧项目无 settingsKey） */
+export function inferPageRecognitionSettingsKey(page: Page): string | null {
+  const r = page.recognition;
+  if (!r) return null;
+  if (r.settingsKey) return r.settingsKey;
+  if (r.provider === 'local') return `A:local-engine:local-tesseract`;
+  return `${r.mode}:${r.provider}:${r.model}`;
+}
+
+/** 批处理队列：待分析页 + 模式切换后需重识别的页 */
+export function pagesForBatchProcessing(pages: Page[], recognitionSettingsKey: string): Page[] {
+  const seen = new Set<string>();
+  const out: Page[] = [];
+  for (const p of [...pagesPendingAnalysis(pages), ...pagesNeedingReRecognition(pages, recognitionSettingsKey)]) {
+    if (seen.has(p.id)) continue;
+    seen.add(p.id);
+    out.push(p);
+  }
+  return out.sort((a, b) => a.index - b.index);
+}
+
 /** 待分析页面 id 签名，用于判断是否有新增页需要批处理 */
 export function pendingAnalysisSignature(pages: Page[]): string {
   return pagesPendingAnalysis(pages)
+    .map((p) => p.id)
+    .sort()
+    .join(',');
+}
+
+/** 批处理签名（含识别模式），用于避免重复启动或检测模式切换 */
+export function batchProcessingSignature(pages: Page[], recognitionSettingsKey: string): string {
+  return pagesForBatchProcessing(pages, recognitionSettingsKey)
     .map((p) => p.id)
     .sort()
     .join(',');

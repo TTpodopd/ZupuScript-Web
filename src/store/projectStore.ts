@@ -93,6 +93,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       currentProjectId: s.currentProjectId === projectId ? null : s.currentProjectId,
       pages: s.currentProjectId === projectId ? [] : s.pages,
       currentPageId: s.currentProjectId === projectId ? null : s.currentPageId,
+      view: s.currentProjectId === projectId ? 'projects' : s.view,
     }));
   },
 

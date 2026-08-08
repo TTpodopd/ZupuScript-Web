@@ -47,6 +47,7 @@ export interface PipelineAPI {
     height: number,
     lines: TreeLine[],
     excludedRects?: Array<Pick<BorderRect | TagRect, 'x' | 'y' | 'w' | 'h'>>,
+    borderRectsForMargin?: Array<Pick<BorderRect | TagRect, 'x' | 'y' | 'w' | 'h'>>,
   ): Promise<CharItem[]>;
 }
 
@@ -74,8 +75,8 @@ const api: PipelineAPI = {
     return { borderRects, tagRects, treeLines, treeNodes, artifacts };
   },
 
-  async segment(binary, width, height, lines, excludedRects = []) {
-    return segmentChars(binary, width, height, lines, excludedRects);
+  async segment(binary, width, height, lines, excludedRects = [], borderRectsForMargin = excludedRects) {
+    return segmentChars(binary, width, height, lines, excludedRects, borderRectsForMargin);
   },
 };
 

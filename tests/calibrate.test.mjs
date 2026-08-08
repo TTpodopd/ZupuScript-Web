@@ -5,6 +5,7 @@ import { check, eq, approx, section, summary } from './helpers.mjs';
 import {
   pxToMm, mmToPx, charHeightToPt, lineWidthToPt, pageMmFromPx,
   clusterCharHeights, calibratePage, ptForGroup,
+  countCharsByGroup, activeFontGroups, applyFontSizeToGroup, applyFontSizeToAllChars, medianPtForGroup, medianPtAllChars, FONT_GROUP_LABELS,
 } from '../src/calibrate/calibrate.ts';
 import { MM_PER_PT, PT_PER_MM, DEFAULT_PX_PER_MM } from '../src/lib/constants.ts';
 import { makeSamplePage } from './helpers.mjs';
@@ -41,7 +42,7 @@ const mkChar = (h, kind = 'text') => ({
   id: `c-${h}-${Math.random()}`, text: '某', cx: 0, cy: 0, bbox: [0, 0, 20, h],
   pt: 0, conf: 0.9, note: 'ok', source: 'llm', edited: false, group: 'body', kind,
 });
-// 两组明显不同的高度：~40px（正文）与 ~80px（标题，>1.3 倍）
+// 两组明显不同的高度：~40px（正文）与 ~80px（>15% 容差切分）
 const chars = [...Array(5)].map(() => mkChar(40)).concat([...Array(3)].map(() => mkChar(80)));
 const groups = clusterCharHeights(chars);
 eq('聚类分为 2 组', groups.length, 2);
@@ -64,6 +65,22 @@ eq('人工覆盖 body=12 优先', r2.fontSizes.body, 12);
 check('body 组字符 pt 同步为 12', r2.chars.filter((c) => c.group === 'body').every((c) => c.pt === 12));
 
 eq('ptForGroup 直取', ptForGroup('title', r.fontSizes), r.fontSizes.title);
+
+section('分组字号面板辅助');
+const mixed = calibratePage(page);
+const counts = countCharsByGroup(mixed.chars);
+check('正文组有字', counts.body > 0);
+check('pageno 组有 side 字', counts.pageno > 0);
+const active = activeFontGroups(mixed.chars);
+check('activeFontGroups 不含空组', active.every((g) => counts[g] > 0));
+check('activeFontGroups 含 rank/body/title/pageno 中有字的组', active.length >= 2);
+const resized = applyFontSizeToGroup(mixed, 'body', 9);
+eq('applyFontSizeToGroup 只改目标组 pt', resized.chars.filter((c) => c.group === 'body').every((c) => c.pt === 9));
+check('applyFontSizeToGroup 不改其他组', resized.chars.filter((c) => c.group !== 'body').every((c) => c.pt === mixed.chars.find((x) => x.id === c.id)?.pt));
+eq('FONT_GROUP_LABELS.rank 可读', FONT_GROUP_LABELS.rank.includes('主文字'));
+const allResized = applyFontSizeToAllChars(mixed, 11);
+eq('applyFontSizeToAllChars 统一 pt', allResized.chars.every((c) => c.pt === 11));
+eq('medianPtAllChars 取中位数', medianPtAllChars(allResized.chars), 11);
 
 // 单组时所有组兜底为同一字号
 const single = calibratePage({ ...page, chars: [mkChar(40)] });

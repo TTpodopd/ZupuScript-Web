@@ -63,7 +63,29 @@ export const MIN_LINE_LEN = 40;
 /** 字符包围盒合理范围（像素，过滤噪声与超大块） */
 export const CHAR_MIN_SIZE = 6;
 export const CHAR_MAX_SIZE = 400;
+/** 小连通域最小面积（字符分割） */
 export const CHAR_MIN_AREA = 20;
+/** 字号聚类相对容差 15%（PDF S7.1） */
+export const FONT_CLUSTER_REL_TOL = 0.15;
+/** 粘连拆分：相对典型字面积阈值（PDF S1.2） */
+export const CHAR_SPLIT_REL_AREA = 1.6;
+/** 断裂合并：合并后相对面积上限（PDF S1.3） */
+export const CHAR_MERGE_REL_AREA_MAX = 1.4;
+/** 断裂合并：次要方向重合度下限（PDF S1.3） */
+export const CHAR_MERGE_OVERLAP_MIN = 0.6;
+/** 断裂合并：主方向最大间隙 = 字宽 × 此系数（PDF S1.3） */
+export const CHAR_MERGE_GAP_FACTOR = 0.25;
+/** 版面视觉分析上传图最长边（降低 429 与超时概率） */
+export const LAYOUT_VISION_MAX_EDGE = 1280;
+/** C 模式整页上行最长边（兼顾小字可读性与 API 体积） */
+export const PAGE_RECOGNITION_MAX_EDGE = 2048;
+/** 版面视觉 429 后本会话暂停时长（毫秒） */
+export const LAYOUT_VISION_RATE_LIMIT_COOLDOWN_MS = 5 * 60_000;
+
+/** 页边正文区推断：外框条带外视为页边 */
+export const MARGIN_EDGE_STRIP_RATIO = 0.14;
+/** 正文区内缩，避免误删贴框字 */
+export const MARGIN_CONTENT_INSET_RATIO = 0.012;
 /** 中值滤波半径 */
 export const MEDIAN_RADIUS = 1;
 /** 小连通域剔除的最小面积 */

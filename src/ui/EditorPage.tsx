@@ -4,7 +4,7 @@
  * 撤销/重做、低置信面板、全键盘操作（F6.9）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BrainCircuit, ClipboardPaste, Copy, Eye, FileImage, FileText, Loader2, Printer, Redo2, Undo2, UserRoundPlus } from 'lucide-react';
+import { BrainCircuit, ClipboardPaste, Copy, Eye, FileImage, FileText, Loader2, Redo2, Undo2, UserRoundPlus } from 'lucide-react';
 import { Button } from '@/ui/components/ui/button';
 import { Input, Label } from '@/ui/components/ui/input';
 import { Select } from '@/ui/components/ui/select';
@@ -17,15 +17,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/ui/components/ui/dialog';
-import { MM_PER_PT, PT_PER_MM } from '@/lib/constants';
-import { calibratePage } from '@/calibrate/calibrate';
-import type { BorderRect, CharItem, FontSizes, Page, TagRect, TreeLine, TreeNode } from '@/model/types';
+import { medianPtAllChars } from '@/calibrate/calibrate';
+import type { BorderRect, CharItem, Page, TagRect, TreeLine, TreeNode } from '@/model/types';
 import { getBinaryImage, getImageBitmap } from '@/storage/opfs';
 import { countMemoryRecords } from '@/storage/db';
 import { useEditorStore } from '@/store/editorStore';
 import { useProjectStore } from '@/store/projectStore';
 import { ptToPx, renderPreviewBinary } from '@/verify/preview';
-import { exportProofreadPdf, exportProofreadPagePdf, exportProofreadPng, exportProofreadPngZip, printProofreadPages } from '@/export/proofreadExport';
+import { exportProofreadPdf, exportProofreadPagePdf, exportProofreadPng, exportProofreadPngZip } from '@/export/proofreadExport';
 import { ExportPreviewScroller } from '@/ui/ExportPreviewScroller';
 import {
   availableExportModes,
@@ -35,10 +34,11 @@ import {
   getExportablePages,
   type ExportMode,
 } from '@/export/exportModes';
-import { uuid } from '@/lib/utils';
+import { uuid, pagesForBatchProcessing } from '@/lib/utils';
+import { currentRecognitionSettingsKey } from '@/recognize/buildConfig';
 import LowConfPanel, { useLowConfChars } from './LowConfPanel';
 import ProofreadCanvas from './ProofreadCanvas';
-import { drawSelectionOverlay, computeFitCenterTransform } from '@/ui/canvasOverlay';
+import { drawSelectionOverlay, computeFitCenterTransform, setCharsBboxSize } from '@/ui/canvasOverlay';
 
 /** 左侧原图画布：与右侧共享 transform，同步显示选区（F6.1） */
 function OriginalCanvas({ page, focusCharId = null }: { page: Page; focusCharId?: string | null }) {
@@ -47,9 +47,9 @@ function OriginalCanvas({ page, focusCharId = null }: { page: Page; focusCharId?
   const transform = useEditorStore((s) => s.transform);
   const setTransform = useEditorStore((s) => s.setTransform);
   const selectedCharIds = useEditorStore((s) => s.selectedCharIds);
-  const selectedLineId = useEditorStore((s) => s.selectedLineId);
-  const selectedNodeId = useEditorStore((s) => s.selectedNodeId);
-  const selectedRectId = useEditorStore((s) => s.selectedRectId);
+  const selectedLineIds = useEditorStore((s) => s.selectedLineIds);
+  const selectedNodeIds = useEditorStore((s) => s.selectedNodeIds);
+  const selectedRectIds = useEditorStore((s) => s.selectedRectIds);
   const rubberBand = useEditorStore((s) => s.rubberBand);
   const [size, setSize] = useState({ w: 0, h: 0 });
 
@@ -83,14 +83,14 @@ function OriginalCanvas({ page, focusCharId = null }: { page: Page; focusCharId?
       drawSelectionOverlay(
         ctx,
         page,
-        { selectedCharIds, selectedLineId, selectedNodeId, selectedRectId, rubberBand },
+        { selectedCharIds, selectedLineIds, selectedNodeIds, selectedRectIds, rubberBand },
         transform.scale,
         { showLowConf: false, showRubber: true, focusCharId },
       );
       bmp.close();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
     })();
-  }, [page, page.imageKey, transform, size, selectedCharIds, selectedLineId, selectedNodeId, selectedRectId, rubberBand, focusCharId]);
+  }, [page, page.imageKey, transform, size, selectedCharIds, selectedLineIds, selectedNodeIds, selectedRectIds, rubberBand, focusCharId]);
 
   return (
     <div ref={containerRef} className="canvas-noselect relative h-full w-full overflow-hidden bg-[#ebe8e2]">
@@ -234,6 +234,10 @@ export default function EditorPage() {
   const page: Page | undefined = pages.find((p) => p.id === currentPageId) ?? pages[0];
   const project = currentProject();
   const exportModes = availableExportModes(pages);
+  const pagesNeedRerun = useMemo(
+    () => pagesForBatchProcessing(pages, currentRecognitionSettingsKey()),
+    [pages],
+  );
   const {
     overlayMode,
     setOverlayMode,
@@ -245,13 +249,14 @@ export default function EditorPage() {
     canUndo,
     canRedo,
     selectedCharIds,
-    selectedLineId,
-    selectedNodeId,
-    selectedRectId,
+    selectedLineIds,
+    selectedNodeIds,
+    selectedRectIds,
     apply,
     setLowConfCursor,
     lowConfCursor,
     setSelection,
+    setRegionSelection,
     setSelectedLine,
     setSelectedNode,
     setSelectedRect,
@@ -260,11 +265,15 @@ export default function EditorPage() {
     centerOnChar,
     lowConfHoverId,
     setLowConfHoverId,
+    showRulers,
+    setShowRulers,
   } = useEditorStore();
   const [showLowConf, setShowLowConf] = useState(true);
-  const [sizeOverrides, setSizeOverrides] = useState<Partial<FontSizes>>({});
+  const [selectionPt, setSelectionPt] = useState('');
+  const [selectionBoxW, setSelectionBoxW] = useState('');
+  const [selectionBoxH, setSelectionBoxH] = useState('');
   const [memoryCount, setMemoryCount] = useState(0);
-  const [canvasExporting, setCanvasExporting] = useState<'png' | 'pdf' | 'print' | null>(null);
+  const [canvasExporting, setCanvasExporting] = useState<'png' | 'pdf' | null>(null);
   const [canvasExportMessage, setCanvasExportMessage] = useState('');
   const [exportMode, setExportMode] = useState<ExportMode>(() => defaultExportMode(pages));
   const [clipboard, setClipboard] = useState<CanvasClipboard | null>(null);
@@ -300,7 +309,11 @@ export default function EditorPage() {
   const exportablePages = useMemo(() => getExportablePages(pages), [pages]);
   const lowConf = useLowConfChars(page);
   const lowConfFocusId = showLowConf ? (lowConfHoverId ?? lowConf[lowConfCursor]?.id ?? null) : null;
-  const hasSelection = selectedCharIds.length > 0 || Boolean(selectedLineId || selectedNodeId || selectedRectId);
+  const hasSelection =
+    selectedCharIds.length > 0 ||
+    selectedLineIds.length > 0 ||
+    selectedNodeIds.length > 0 ||
+    selectedRectIds.length > 0;
 
   const copySelection = useCallback(() => {
     if (!page) return;
@@ -311,23 +324,23 @@ export default function EditorPage() {
       if (items.length > 0) setClipboard({ kind: 'chars', items });
       return;
     }
-    if (selectedLineId) {
-      const item = page.treeLines.find((line) => line.id === selectedLineId);
+    if (selectedLineIds.length > 0) {
+      const item = page.treeLines.find((line) => line.id === selectedLineIds[0]);
       if (item) setClipboard({ kind: 'line', item });
       return;
     }
-    if (selectedNodeId) {
-      const item = page.treeNodes.find((node) => node.id === selectedNodeId);
+    if (selectedNodeIds.length > 0) {
+      const item = page.treeNodes.find((node) => node.id === selectedNodeIds[0]);
       if (item) setClipboard({ kind: 'node', item });
       return;
     }
-    if (selectedRectId) {
-      const border = page.borderRects.find((rect) => rect.id === selectedRectId);
-      const tag = page.tagRects.find((rect) => rect.id === selectedRectId);
+    if (selectedRectIds.length > 0) {
+      const border = page.borderRects.find((rect) => rect.id === selectedRectIds[0]);
+      const tag = page.tagRects.find((rect) => rect.id === selectedRectIds[0]);
       if (border) setClipboard({ kind: 'rect', item: border, rectKind: 'border' });
       else if (tag) setClipboard({ kind: 'rect', item: tag, rectKind: 'tag' });
     }
-  }, [page, selectedCharIds, selectedLineId, selectedNodeId, selectedRectId]);
+  }, [page, selectedCharIds, selectedLineIds, selectedNodeIds, selectedRectIds]);
 
   const pasteSelection = useCallback(() => {
     if (!page || !clipboard) return;
@@ -461,25 +474,27 @@ export default function EditorPage() {
         return;
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedCharIds.length > 0) {
-          e.preventDefault();
-          for (const id of selectedCharIds) {
-            const c = page.chars.find((v) => v.id === id);
-            if (c) apply({ type: 'char.remove', char: c });
-          }
-          setSelection([]);
-        } else if (selectedLineId) {
-          const line = page.treeLines.find((value) => value.id === selectedLineId);
+        if (!hasSelection) return;
+        e.preventDefault();
+        for (const id of selectedCharIds) {
+          const c = page.chars.find((v) => v.id === id);
+          if (c) apply({ type: 'char.remove', char: c });
+        }
+        for (const id of selectedLineIds) {
+          const line = page.treeLines.find((value) => value.id === id);
           if (line) apply({ type: 'line.remove', line });
-        } else if (selectedNodeId) {
-          const node = page.treeNodes.find((value) => value.id === selectedNodeId);
+        }
+        for (const id of selectedNodeIds) {
+          const node = page.treeNodes.find((value) => value.id === id);
           if (node) apply({ type: 'node.remove', node });
-        } else if (selectedRectId) {
-          const border = page.borderRects.find((value) => value.id === selectedRectId);
-          const tag = page.tagRects.find((value) => value.id === selectedRectId);
+        }
+        for (const id of selectedRectIds) {
+          const border = page.borderRects.find((value) => value.id === id);
+          const tag = page.tagRects.find((value) => value.id === id);
           if (border) apply({ type: 'rect.remove', rect: border, kind: 'border' });
           else if (tag) apply({ type: 'rect.remove', rect: tag, kind: 'tag' });
         }
+        setRegionSelection([], [], [], []);
         return;
       }
       const step = e.shiftKey ? 10 : 1;
@@ -489,15 +504,70 @@ export default function EditorPage() {
         ArrowUp: [0, -step],
         ArrowDown: [0, step],
       };
-      if (e.key in dirs && selectedCharIds.length > 0) {
+      if (e.key in dirs && (selectedCharIds.length > 0 || selectedLineIds.length > 0 || selectedNodeIds.length > 0 || selectedRectIds.length > 0)) {
         e.preventDefault();
         const [dx, dy] = dirs[e.key];
-        apply({ type: 'char.batchMove', ids: selectedCharIds, dx, dy });
+        if (selectedCharIds.length > 0) apply({ type: 'char.batchMove', ids: selectedCharIds, dx, dy });
+        if (selectedLineIds.length > 0) apply({ type: 'line.batchMove', ids: selectedLineIds, dx, dy });
+        if (selectedNodeIds.length > 0) apply({ type: 'node.batchMove', ids: selectedNodeIds, dx, dy });
+        if (selectedRectIds.length > 0) apply({ type: 'rect.batchMove', ids: selectedRectIds, dx, dy });
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [page, selectedCharIds, selectedLineId, selectedNodeId, selectedRectId, lowConf, lowConfCursor, apply, undo, redo, setSelection, setLowConfCursor, centerOnChar, transform.scale, clipboard, copySelection, hasSelection, pasteSelection]);
+  }, [page, selectedCharIds, selectedLineIds, selectedNodeIds, selectedRectIds, lowConf, lowConfCursor, apply, undo, redo, setSelection, setRegionSelection, setSelectedLine, setSelectedNode, setSelectedRect, setLowConfCursor, centerOnChar, transform.scale, clipboard, copySelection, hasSelection, pasteSelection]);
+
+  const selectedChars = useMemo(
+    () => (page ? page.chars.filter((c) => selectedCharIds.includes(c.id)) : []),
+    [page, selectedCharIds],
+  );
+
+  const selectionPtHint = useMemo(() => {
+    if (selectedChars.length === 0) return null;
+    const pts = selectedChars.map((c) => c.pt).filter((pt) => pt > 0);
+    if (pts.length === 0) return page?.fontSizes.body || 12;
+    const avg = pts.reduce((sum, pt) => sum + pt, 0) / pts.length;
+    return Math.round(avg * 10) / 10;
+  }, [selectedChars, page?.fontSizes.body]);
+
+  const selectionBoxHint = useMemo(() => {
+    if (selectedChars.length === 0) return null;
+    const widths = selectedChars.map((c) => c.bbox[2] - c.bbox[0]);
+    const heights = selectedChars.map((c) => c.bbox[3] - c.bbox[1]);
+    const avg = (vals: number[]) => Math.round((vals.reduce((s, v) => s + v, 0) / vals.length) * 10) / 10;
+    return { w: avg(widths), h: avg(heights) };
+  }, [selectedChars]);
+
+  const globalPtHint = useMemo(() => (page ? medianPtAllChars(page.chars) : 0), [page]);
+
+  useEffect(() => {
+    if (selectionPtHint != null) setSelectionPt(String(selectionPtHint));
+    else setSelectionPt('');
+  }, [selectionPtHint, selectedCharIds.join(',')]);
+
+  useEffect(() => {
+    if (selectionBoxHint) {
+      setSelectionBoxW(String(selectionBoxHint.w));
+      setSelectionBoxH(String(selectionBoxHint.h));
+    } else {
+      setSelectionBoxW('');
+      setSelectionBoxH('');
+    }
+  }, [selectionBoxHint, selectedCharIds.join(',')]);
+
+  const setGlobalFontSize = useCallback(
+    (raw: string) => {
+      if (!page) return;
+      const value = parseFloat(raw);
+      if (!(value > 0) || page.chars.length === 0) return;
+      if (page.chars.every((c) => Math.abs(c.pt - value) < 0.05)) return;
+      const beforePts: Record<string, number> = {};
+      for (const c of page.chars) beforePts[c.id] = c.pt;
+      apply({ type: 'char.batchResize', ids: page.chars.map((c) => c.id), beforePts, pt: value });
+      updatePage(page.id, { fontSizes: { body: value, title: value, pageno: value, rank: value } });
+    },
+    [page, updatePage, apply],
+  );
 
   if (!page) {
     return (
@@ -510,11 +580,65 @@ export default function EditorPage() {
     );
   }
 
-  /** 应用字号人工覆盖（F5.5） */
-  const applySizeOverrides = () => {
-    const { fontSizes, chars } = calibratePage(page, sizeOverrides);
-    updatePage(page.id, { fontSizes, chars });
-    setSizeOverrides({});
+  const applySelectionPt = (pt: number) => {
+    if (selectedCharIds.length === 0 || !(pt > 0)) return;
+    const beforePts: Record<string, number> = {};
+    for (const c of selectedChars) beforePts[c.id] = c.pt;
+    if (selectedChars.every((c) => Math.abs(c.pt - pt) < 0.05)) return;
+    apply({ type: 'char.batchResize', ids: selectedCharIds, beforePts, pt });
+  };
+
+  const handleSelectionPtChange = (raw: string) => {
+    setSelectionPt(raw);
+    const pt = parseFloat(raw);
+    if (pt > 0) applySelectionPt(pt);
+  };
+
+  const applySelectionBbox = (width?: number, height?: number) => {
+    if (selectedChars.length === 0) return;
+    const w = width ?? parseFloat(selectionBoxW);
+    const h = height ?? parseFloat(selectionBoxH);
+    if (!(w > 0) || !(h > 0)) return;
+    const before: Record<string, { cx: number; cy: number; bbox: [number, number, number, number] }> = {};
+    for (const c of selectedChars) {
+      before[c.id] = { cx: c.cx, cy: c.cy, bbox: [...c.bbox] };
+    }
+    const after = setCharsBboxSize(selectedChars, w, h);
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      apply({ type: 'char.batchBbox', before, after });
+    }
+  };
+
+  const handleSelectionBoxWChange = (raw: string) => {
+    setSelectionBoxW(raw);
+    const w = parseFloat(raw);
+    if (w > 0) applySelectionBbox(w, undefined);
+  };
+
+  const handleSelectionBoxHChange = (raw: string) => {
+    setSelectionBoxH(raw);
+    const h = parseFloat(raw);
+    if (h > 0) applySelectionBbox(undefined, h);
+  };
+
+  const unifySelectionBbox = () => {
+    if (!selectionBoxHint || selectedChars.length === 0) return;
+    applySelectionBbox(selectionBoxHint.w, selectionBoxHint.h);
+    showActionHint(`已将 ${selectedChars.length} 个字符定位框统一为 ${selectionBoxHint.w}×${selectionBoxHint.h} px`);
+  };
+
+  const scaleSelectionPt = (factor: number) => {
+    if (selectedCharIds.length === 0) return;
+    const beforePts: Record<string, number> = {};
+    const afterPts: Record<string, number> = {};
+    for (const c of selectedChars) {
+      beforePts[c.id] = c.pt;
+      afterPts[c.id] = Math.max(0.5, Math.round(c.pt * factor * 10) / 10);
+    }
+    apply({ type: 'char.batchResize', ids: selectedCharIds, beforePts, afterPts });
+    const sample = afterPts[selectedCharIds[0]];
+    showActionHint(`已将 ${selectedCharIds.length} 个字符字号 ×${factor}（约 ${sample} pt）`);
+    if (sample) setSelectionPt(String(sample));
   };
 
   const openAddNameDialog = () => {
@@ -533,9 +657,9 @@ export default function EditorPage() {
     let anchorX = page.source.widthPx / 2;
     let anchorY = page.source.heightPx / 2;
     const selectedChar = page.chars.find((char) => char.id === selectedCharIds[0]);
-    const selectedLine = page.treeLines.find((line) => line.id === selectedLineId);
-    const selectedNode = page.treeNodes.find((node) => node.id === selectedNodeId);
-    const selectedRect = [...page.borderRects, ...page.tagRects].find((rect) => rect.id === selectedRectId);
+    const selectedLine = page.treeLines.find((line) => line.id === selectedLineIds[0]);
+    const selectedNode = page.treeNodes.find((node) => node.id === selectedNodeIds[0]);
+    const selectedRect = [...page.borderRects, ...page.tagRects].find((rect) => rect.id === selectedRectIds[0]);
     if (selectedChar) {
       anchorX = selectedChar.cx + boxSize * 1.4;
       anchorY = selectedChar.cy;
@@ -610,28 +734,21 @@ export default function EditorPage() {
     }
   };
 
-  const executePrint = async () => {
-    if (previewPages.length === 0) return;
-    setCanvasExporting('print');
-    setCanvasExportMessage(`正在准备打印（0/${previewPages.length}）…`);
-    const title = currentProject()?.name ?? '校对成果';
-    try {
-      await printProofreadPages(previewPages, title, (done, total) => {
-        setCanvasExportMessage(`正在准备打印（${done}/${total}）…`);
-      });
-      setCanvasExportMessage('已打开打印对话框；若四角有网址/日期，请在「更多设置」中关闭「页眉和页脚」');
-    } catch (error) {
-      setCanvasExportMessage(error instanceof Error ? error.message : '打印失败');
-    } finally {
-      setCanvasExporting(null);
-    }
-  };
-
   const canExportPng = exportMode === 'page-png' || exportMode === 'page-pdf' || exportMode === 'pages-png-zip';
   const canExportPdf = exportMode === 'page-png' || exportMode === 'page-pdf' || exportMode === 'merged-pdf' || exportMode === 'pages-png-zip';
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      {pagesNeedRerun.length > 0 && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
+          <span>
+            检测到 {pagesNeedRerun.length} 页识别结果不完整（识别算法已更新），建议重新识别以填充空字。
+          </span>
+          <Button size="sm" variant="secondary" onClick={() => setView('analyze')}>
+            重新识别
+          </Button>
+        </div>
+      )}
       <div className="relative z-20 shrink-0 border-b bg-card shadow-soft">
         <div className="flex flex-nowrap items-center gap-2 overflow-x-auto px-3 py-2.5">
           <Select
@@ -760,6 +877,19 @@ export default function EditorPage() {
           >
             低置信 {lowConf.length > 0 ? `(${lowConf.length})` : ''}
           </Button>
+          <Button
+            size="sm"
+            variant={showRulers ? 'secondary' : 'outline'}
+            onClick={() => {
+              const next = !showRulers;
+              setShowRulers(next);
+              showActionHint(next ? '已开启校对区标尺与对齐参考线' : '已关闭校对区标尺');
+            }}
+            aria-pressed={showRulers}
+            aria-label="标尺"
+          >
+            标尺
+          </Button>
           <div className="flex-1" />
           {exportModes.length > 0 && (
             <Select
@@ -803,7 +933,7 @@ export default function EditorPage() {
             size="sm"
             variant="default"
             onClick={() => {
-              showActionHint('打开导出预览，可缩放查看、打印或导出');
+              showActionHint('打开导出预览，可缩放查看或导出');
               setShowExportPreview(true);
             }}
             disabled={page.chars.length === 0 || canvasExporting !== null}
@@ -820,7 +950,7 @@ export default function EditorPage() {
             已学习 <strong className="font-medium text-foreground">{memoryCount}</strong> 字
           </span>
           <span className="hidden sm:inline">·</span>
-          <span>已选 <strong className="font-medium text-foreground">{selectedCharIds.length + (selectedLineId || selectedNodeId || selectedRectId ? 1 : 0)}</strong> 个元素</span>
+          <span>已选 <strong className="font-medium text-foreground">{selectedCharIds.length + selectedLineIds.length + selectedNodeIds.length + selectedRectIds.length}</strong> 个元素</span>
           {actionHint && (
             <>
               <span className="hidden md:inline">·</span>
@@ -872,35 +1002,114 @@ export default function EditorPage() {
               onPointerUp={endLowConfResize}
               onPointerCancel={endLowConfResize}
             />
-            <div className="flex min-h-0 shrink-0 flex-col overflow-hidden border-l" style={{ width: lowConfWidth }}>
-            <div className="min-h-0 flex-1 overflow-hidden">
-              <LowConfPanel page={page} />
-            </div>
-            <div className="max-h-[min(40vh,16rem)] shrink-0 space-y-2 overflow-y-auto border-t p-3 text-xs">
-              <div className="font-medium">标定（F5，公式可查看）</div>
-              <div className="text-muted-foreground">
-                PX_PER_MM={page.calibration.pxPerMm.toFixed(3)}（已锁定） pt = 字高px / PX_PER_MM / {MM_PER_PT}；线宽
-                pt = px / PX_PER_MM × {PT_PER_MM.toFixed(6)}
-              </div>
-              {(['body', 'title', 'pageno', 'rank'] as const).map((g) => (
-                <div key={g} className="flex items-center gap-2">
-                  <Label className="w-14">{{ body: '正文', title: '标题', pageno: '页码', rank: '排行' }[g]}</Label>
-                  <Input
-                    type="number"
-                    step={0.5}
-                    defaultValue={page.fontSizes[g]}
-                    onChange={(e) => setSizeOverrides((o) => ({ ...o, [g]: parseFloat(e.target.value) || undefined }))}
-                    className="h-7 w-20"
-                    aria-label={`${g} 字号覆盖`}
-                  />
-                  <span className="text-muted-foreground">pt</span>
+            <div className="flex min-h-0 shrink-0 flex-col overflow-hidden border-l bg-[#f7f5f1]" style={{ width: lowConfWidth }}>
+              <section className="shrink-0 border-b-2 border-stone-300/80">
+                <header className="border-b border-stone-200/90 bg-stone-100/90 px-3 py-2 text-xs font-semibold text-stone-800">
+                  字号调整
+                </header>
+                <div className="space-y-2 px-3 py-2.5 text-xs text-stone-600">
+                  {page.chars.length === 0 ? (
+                    <p>本页尚无识别字符，请先完成深度识别。</p>
+                  ) : (
+                    <>
+                      <p className="leading-snug">统一调整本页全部文字（共 {page.chars.length} 字），修改后立即生效。</p>
+                      <div className="flex items-center gap-2 rounded-md border border-stone-200/90 bg-white/70 px-2.5 py-2">
+                        <Label className="shrink-0 text-xs font-medium text-stone-700">主文字</Label>
+                        <Input
+                          type="number"
+                          step={0.5}
+                          min={0.5}
+                          value={globalPtHint || page.fontSizes.rank || page.fontSizes.body}
+                          onChange={(e) => setGlobalFontSize(e.target.value)}
+                          className="h-8 w-[4.5rem] text-xs"
+                          aria-label="主文字字号"
+                        />
+                        <span className="text-xs text-stone-500">pt</span>
+                      </div>
+                    </>
+                  )}
                 </div>
-              ))}
-              <Button size="sm" variant="outline" onClick={applySizeOverrides} disabled={Object.keys(sizeOverrides).length === 0}>
-                应用字号覆盖
-              </Button>
+              </section>
+
+              {selectedCharIds.length > 0 && (
+                <section className="shrink-0 border-b-2 border-stone-300/80">
+                  <header className="border-b border-stone-200/90 bg-stone-100/90 px-3 py-2 text-xs font-semibold text-stone-800">
+                    选中区域（{selectedCharIds.length} 字）
+                  </header>
+                  <div className="space-y-2 px-3 py-2.5 text-xs text-stone-600">
+                    <p className="leading-snug">Ctrl+点选或框选多个字符，调整字号或定位框尺寸；画布上可拖拽蓝框边角缩放。</p>
+                    <div className="flex items-center gap-2 rounded-md border border-stone-200/90 bg-white/70 px-2.5 py-2">
+                      <Label className="shrink-0 text-xs font-medium text-stone-700">字号</Label>
+                      <Input
+                        type="number"
+                        step={0.5}
+                        min={0.5}
+                        value={selectionPt}
+                        onChange={(e) => handleSelectionPtChange(e.target.value)}
+                        className="h-8 w-[4.5rem] text-xs"
+                        aria-label="选中区域字号 pt"
+                      />
+                      <span className="text-xs text-stone-500">pt</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="flex items-center gap-1.5 rounded-md border border-stone-200/90 bg-white/70 px-2 py-2">
+                        <Label className="shrink-0 text-xs font-medium text-stone-700">框宽</Label>
+                        <Input
+                          type="number"
+                          step={1}
+                          min={6}
+                          value={selectionBoxW}
+                          onChange={(e) => handleSelectionBoxWChange(e.target.value)}
+                          className="h-8 min-w-0 flex-1 text-xs"
+                          aria-label="定位框宽度 px"
+                        />
+                        <span className="text-xs text-stone-500">px</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 rounded-md border border-stone-200/90 bg-white/70 px-2 py-2">
+                        <Label className="shrink-0 text-xs font-medium text-stone-700">框高</Label>
+                        <Input
+                          type="number"
+                          step={1}
+                          min={6}
+                          value={selectionBoxH}
+                          onChange={(e) => handleSelectionBoxHChange(e.target.value)}
+                          className="h-8 min-w-0 flex-1 text-xs"
+                          aria-label="定位框高度 px"
+                        />
+                        <span className="text-xs text-stone-500">px</span>
+                      </div>
+                    </div>
+                    {selectedCharIds.length > 1 && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 w-full border-stone-200/90 bg-white/70 text-xs text-stone-700"
+                        onClick={unifySelectionBbox}
+                      >
+                        统一框尺寸
+                      </Button>
+                    )}
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {[0.75, 0.85, 0.9, 1.1].map((factor) => (
+                        <Button
+                          key={factor}
+                          size="sm"
+                          variant="outline"
+                          className="h-8 border-stone-200/90 bg-white/70 px-0 text-xs text-stone-700"
+                          onClick={() => scaleSelectionPt(factor)}
+                        >
+                          ×{factor}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              <div className="min-h-0 flex-1 overflow-hidden">
+                <LowConfPanel page={page} />
+              </div>
             </div>
-          </div>
           </>
         )}
       </div>
@@ -931,10 +1140,6 @@ export default function EditorPage() {
             <Button onClick={() => void executeExport('pdf')} disabled={previewPages.length === 0 || !canExportPdf || canvasExporting !== null}>
               {canvasExporting === 'pdf' ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
               导出 PDF
-            </Button>
-            <Button variant="outline" onClick={() => void executePrint()} disabled={previewPages.length === 0 || canvasExporting !== null}>
-              {canvasExporting === 'print' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Printer className="h-4 w-4" />}
-              打印
             </Button>
             <Button variant="outline" onClick={() => handleExportPreviewOpenChange(false)}>
               关闭

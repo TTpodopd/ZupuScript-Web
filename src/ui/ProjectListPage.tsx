@@ -4,6 +4,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { Download, FolderOpen, Pencil, Plus, Search, Trash2, Upload } from 'lucide-react';
 import { Button } from '@/ui/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/ui/components/ui/dialog';
 import { Input } from '@/ui/components/ui/input';
 import { estimateUsage, listPagesOfProject, savePage, saveProject } from '@/storage/db';
 import { exportProject, importProject } from '@/model/zpproj';
@@ -22,6 +30,9 @@ export default function ProjectListPage() {
   const [sortMode, setSortMode] = useState<'updated' | 'created' | 'name'>('updated');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
 
   const visibleProjects = [...projects]
@@ -84,6 +95,21 @@ export default function ProjectListPage() {
   const handleExportZpproj = async (projectId: string, name: string) => {
     const pages = await listPagesOfProject(projectId);
     downloadText(`${name}.zpproj.json`, exportProject(projects.find((p) => p.id === projectId)!, pages), 'application/json');
+  };
+
+  const handleDeleteProject = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    setDeleteError('');
+    try {
+      await removeProject(deleteTarget.id);
+      setDeleteTarget(null);
+      void estimateUsage().then(setUsage);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : '删除失败，请重试');
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -162,7 +188,7 @@ export default function ProjectListPage() {
           return (
             <li
               key={p.id}
-              className="group flex items-center gap-4 rounded-2xl border bg-card p-5 card-shadow transition-all duration-200 hover:card-shadow-lg"
+              className="group flex flex-wrap items-center gap-4 rounded-2xl border bg-card p-5 card-shadow transition-all duration-200 hover:card-shadow-lg sm:flex-nowrap"
             >
               {/* 项目图标 */}
               <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-lg font-bold text-primary">
@@ -201,7 +227,7 @@ export default function ProjectListPage() {
               </div>
 
               {/* 操作区 */}
-              <div className="flex items-center gap-1.5">
+              <div className="flex w-full shrink-0 items-center justify-end gap-1.5 sm:w-auto">
                 <Button
                   size="sm"
                   onClick={() => {
@@ -224,10 +250,10 @@ export default function ProjectListPage() {
                   size="sm"
                   variant="ghost"
                   onClick={() => {
-                    if (confirm(`确定删除项目「${p.name}」？页面数据与本地图像将一并删除。`)) {
-                      void removeProject(p.id);
-                    }
+                    setDeleteError('');
+                    setDeleteTarget({ id: p.id, name: p.name });
                   }}
+                  aria-label={`删除项目 ${p.name}`}
                   className="rounded-lg text-destructive hover:bg-destructive/10 hover:text-destructive"
                 >
                   <Trash2 className="h-4 w-4" />
@@ -237,6 +263,26 @@ export default function ProjectListPage() {
           );
         })}
       </ul>
+
+      <Dialog open={deleteTarget !== null} onOpenChange={(open) => !open && !deleting && setDeleteTarget(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>删除项目</DialogTitle>
+            <DialogDescription>
+              确定删除「{deleteTarget?.name}」？该项目下的页面数据与本地图像将一并删除，且不可恢复。
+            </DialogDescription>
+          </DialogHeader>
+          {deleteError && <p className="text-sm text-destructive">{deleteError}</p>}
+          <DialogFooter className="gap-2 sm:justify-end">
+            <Button variant="outline" onClick={() => setDeleteTarget(null)} disabled={deleting}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={() => void handleDeleteProject()} disabled={deleting}>
+              {deleting ? '删除中…' : '确认删除'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
