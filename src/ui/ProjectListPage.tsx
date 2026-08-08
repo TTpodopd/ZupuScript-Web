@@ -2,7 +2,7 @@
  * 多项目列表（F1.6）：页数、完成度、占用空间、单独删除；.zpproj.json 导入/导出（F1.5）。
  */
 import { useEffect, useRef, useState } from 'react';
-import { Download, FolderOpen, Plus, Trash2, Upload } from 'lucide-react';
+import { Download, FolderOpen, Pencil, Plus, Search, Trash2, Upload } from 'lucide-react';
 import { Button } from '@/ui/components/ui/button';
 import { Input } from '@/ui/components/ui/input';
 import { estimateUsage, listPagesOfProject, savePage, saveProject } from '@/storage/db';
@@ -13,24 +13,34 @@ import type { PageStatus } from '@/model/types';
 
 const STATUS_ORDER: PageStatus[] = ['imported', 'preprocessed', 'analyzed', 'recognized', 'proofread', 'exported'];
 
-function statusLabel(s: PageStatus): string {
-  const map: Record<PageStatus, string> = {
-    imported: '已导入',
-    preprocessed: '已预处理',
-    analyzed: '已分析',
-    recognized: '已识别',
-    proofread: '已校对',
-    exported: '已导出',
-  };
-  return map[s];
-}
-
 export default function ProjectListPage() {
   const { projects, loadFromDB, createProject, openProject, removeProject, setView, loaded } = useProjectStore();
   const [newName, setNewName] = useState('');
   const [usage, setUsage] = useState<{ usage: number; quota: number }>({ usage: 0, quota: 0 });
   const [pageStats, setPageStats] = useState<Record<string, { count: number; done: number }>>({});
+  const [query, setQuery] = useState('');
+  const [sortMode, setSortMode] = useState<'updated' | 'created' | 'name'>('updated');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const visibleProjects = [...projects]
+    .filter((project) => project.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+    .sort((a, b) => {
+      if (sortMode === 'name') return a.name.localeCompare(b.name, 'zh-CN');
+      return sortMode === 'created' ? b.createdAt - a.createdAt : b.updatedAt - a.updatedAt;
+    });
+
+  const startRename = (id: string, name: string) => {
+    setEditingId(id);
+    setEditingName(name);
+  };
+
+  const commitRename = (id: string) => {
+    const name = editingName.trim();
+    if (name) useProjectStore.getState().renameProject(id, name);
+    setEditingId(null);
+  };
 
   useEffect(() => {
     if (!loaded) void loadFromDB();
@@ -92,7 +102,7 @@ export default function ProjectListPage() {
         <Input
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
-          placeholder="新项目名称，如：倪氏族谱 卷三"
+          placeholder="请输入项目名称"
           onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
           aria-label="新项目名称"
           className="rounded-xl"
@@ -128,9 +138,25 @@ export default function ProjectListPage() {
         </div>
       )}
 
+      {/* 历史项目筛选 */}
+      {projects.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3">
+          <div className="relative min-w-[220px] flex-1">
+            <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索历史项目" aria-label="搜索历史项目" className="pl-9" />
+          </div>
+          <select value={sortMode} onChange={(e) => setSortMode(e.target.value as typeof sortMode)} className="h-9 rounded-lg border border-input bg-card px-3 text-sm">
+            <option value="updated">最近使用</option>
+            <option value="created">创建时间</option>
+            <option value="name">项目名称</option>
+          </select>
+          <span className="text-xs text-muted-foreground">共 {visibleProjects.length} 个历史项目</span>
+        </div>
+      )}
+
       {/* 项目卡片列表 */}
       <ul className="space-y-3">
-        {projects.map((p) => {
+        {visibleProjects.map((p) => {
           const stat = pageStats[p.id];
           const pct = stat && stat.count > 0 ? Math.round((stat.done / stat.count) * 100) : 0;
           return (
@@ -145,7 +171,22 @@ export default function ProjectListPage() {
 
               {/* 信息区 */}
               <div className="min-w-0 flex-1">
-                <div className="truncate font-medium">{p.name}</div>
+                {editingId === p.id ? (
+                  <Input
+                    value={editingName}
+                    autoFocus
+                    onChange={(e) => setEditingName(e.target.value)}
+                    onBlur={() => commitRename(p.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') commitRename(p.id);
+                      if (e.key === 'Escape') setEditingId(null);
+                    }}
+                    className="h-8 max-w-sm"
+                    aria-label="编辑项目名称"
+                  />
+                ) : (
+                  <div className="truncate font-medium">{p.name}</div>
+                )}
                 <div className="mt-0.5 text-xs text-muted-foreground">
                   {stat?.count ?? p.pageIds.length} 页 · 完成度 {pct}% · {formatTime(p.updatedAt)}
                 </div>
@@ -164,11 +205,17 @@ export default function ProjectListPage() {
                 <Button
                   size="sm"
                   onClick={() => {
-                    void openProject(p.id).then(() => setView('import'));
+                    void openProject(p.id).then(() => {
+                      const hasResult = useProjectStore.getState().pages.some((page) => page.chars.length > 0);
+                      setView(hasResult ? 'editor' : 'import');
+                    });
                   }}
                   className="rounded-lg"
                 >
                   <FolderOpen className="h-4 w-4" /> 打开
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => startRename(p.id, p.name)} aria-label={`重命名项目 ${p.name}`} className="rounded-lg">
+                  <Pencil className="h-4 w-4" />
                 </Button>
                 <Button size="sm" variant="outline" onClick={() => void handleExportZpproj(p.id, p.name)} className="rounded-lg">
                   <Download className="h-4 w-4" /> 导出
@@ -190,13 +237,6 @@ export default function ProjectListPage() {
           );
         })}
       </ul>
-
-      {/* 状态流程 */}
-      <div className="mt-8 rounded-xl bg-muted/40 p-4">
-        <p className="text-xs text-muted-foreground">
-          页面状态流程：{STATUS_ORDER.map(statusLabel).join(' → ')}
-        </p>
-      </div>
     </div>
   );
 }

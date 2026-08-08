@@ -1,6 +1,6 @@
 /**
  * 本地兜底识别（F4.11）：Tesseract.js chi_tra，经 Comlink 隔离在 ocr.worker。
- * 结果全部 conf=0 标红待人工（共享约定：降级链末端）。
+ * 多裁剪、多方向投票后返回校准置信度；云端失败降级时由编排器决定是否标红。
  * 无密钥也能跑完全流程；图像不出本机。
  */
 import * as Comlink from 'comlink';
@@ -9,8 +9,15 @@ import type { CharItem } from '@/model/types';
 import { arrayBufferToBase64 } from '@/lib/utils';
 
 export interface OcrWorkerAPI {
-  ocrChars(items: Array<{ key: string; dataUrl: string }>): Promise<Array<{ key: string; text: string | null }>>;
+  ocrChars(items: Array<{ key: string; dataUrls: string[] }>): Promise<LocalOcrResult[]>;
   terminate(): Promise<void>;
+}
+
+export interface LocalOcrResult {
+  key: string;
+  text: string | null;
+  confidence: number;
+  candidates: string[];
 }
 
 let workerInstance: Worker | null = null;
@@ -30,10 +37,10 @@ async function charCropToDataUrl(
   pageWidth: number,
   pageHeight: number,
   bbox: [number, number, number, number],
+  pad = 4,
+  size = 96,
 ): Promise<string> {
-  const pad = 4;
   const crop = cropBinary(bin, pageWidth, pageHeight, bbox[0] - pad, bbox[1] - pad, bbox[2] - bbox[0] + pad * 2, bbox[3] - bbox[1] + pad * 2);
-  const size = 64;
   const canvas = new OffscreenCanvas(size, size);
   const ctx = canvas.getContext('2d')!;
   ctx.fillStyle = '#fff';
@@ -63,20 +70,33 @@ async function charCropToDataUrl(
 }
 
 /**
- * 本地识别一批字符。返回 charId → 识别文本（全部视为低置信，由调用方置 conf=0）。
+ * 本地识别一批字符。返回 charId → 多轮投票结果。
  */
 export async function localOcrChars(
   chars: CharItem[],
   bin: Uint8Array,
   pageWidth: number,
   pageHeight: number,
-): Promise<Map<string, string | null>> {
-  const items = await Promise.all(
-    chars.map(async (c) => ({ key: c.id, dataUrl: await charCropToDataUrl(bin, pageWidth, pageHeight, c.bbox) })),
-  );
+  onProgress?: (done: number, total: number) => void,
+): Promise<Map<string, LocalOcrResult>> {
   const api = getWorker();
-  const results = await api.ocrChars(items);
-  return new Map(results.map((r) => [r.key, r.text]));
+  const results = new Map<string, LocalOcrResult>();
+  const chunkSize = 12;
+  for (let start = 0; start < chars.length; start += chunkSize) {
+    const chunk = chars.slice(start, start + chunkSize);
+    const items = await Promise.all(chunk.map(async (c) => ({
+      key: c.id,
+      dataUrls: await Promise.all([
+        charCropToDataUrl(bin, pageWidth, pageHeight, c.bbox, 2, 96),
+        charCropToDataUrl(bin, pageWidth, pageHeight, c.bbox, 5, 96),
+        charCropToDataUrl(bin, pageWidth, pageHeight, c.bbox, 8, 128),
+      ]),
+    })));
+    const partial = await api.ocrChars(items);
+    for (const result of partial) results.set(result.key, result);
+    onProgress?.(Math.min(chars.length, start + chunk.length), chars.length);
+  }
+  return results;
 }
 
 /** 释放本地 OCR 资源（WASM 体积大，不用时及时释放） */

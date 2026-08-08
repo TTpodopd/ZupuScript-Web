@@ -128,8 +128,14 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set((s) => {
       const pages = s.pages.map((p) => (p.id === pageId ? { ...p, ...patch } : p));
       const updated = pages.find((p) => p.id === pageId);
+      const project = updated ? s.projects.find((p) => p.id === updated.projectId) : undefined;
+      const projects = project
+        ? s.projects.map((p) => (p.id === project.id ? { ...p, updatedAt: Date.now() } : p))
+        : s.projects;
       if (updated) persistPage(updated);
-      return { pages };
+      const changedProject = project ? projects.find((p) => p.id === project.id) : undefined;
+      if (changedProject) void saveProject(changedProject);
+      return { pages, projects };
     });
   },
 
@@ -145,6 +151,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       const projects = s.projects.map((p) =>
         p.id === s.currentProjectId ? { ...p, pageIds: pages.map((x) => x.id), updatedAt: Date.now() } : p,
       );
+      const project = projects.find((p) => p.id === s.currentProjectId);
+      if (project) void saveProject(project);
       return {
         pages,
         projects,

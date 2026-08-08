@@ -11,56 +11,88 @@ import { uuid } from '@/lib/utils';
  * 对每个候选中心，采样半径 r 的圆周覆盖率（≥0.55）与内部覆盖率（≤0.3），
  * 满足即判定为空心圆；NMS 去重。
  */
-export function detectNodes(bin: Uint8Array, width: number, height: number): TreeNode[] {
-  const candidates: Array<{ cx: number; cy: number; r: number; score: number }> = [];
-  const SAMPLES = 24;
-  const step = 4;
-  for (let cy = NODE_R_MAX; cy < height - NODE_R_MAX; cy += step) {
-    for (let cx = NODE_R_MAX; cx < width - NODE_R_MAX; cx += step) {
-      for (let r = NODE_R_MIN; r <= NODE_R_MAX; r += 3) {
-        // 圆周覆盖率
-        let ringHits = 0;
-        for (let s = 0; s < SAMPLES; s++) {
-          const theta = (2 * Math.PI * s) / SAMPLES;
-          // 圆周线宽容忍 ±1px，取两处样本之一命中即可
-          let hit = 0;
-          for (const rr of [r - 1, r, r + 1]) {
-            const x = Math.round(cx + rr * Math.cos(theta));
-            const y = Math.round(cy + rr * Math.sin(theta));
-            if (x >= 0 && x < width && y >= 0 && y < height && bin[y * width + x]) {
-              hit = 1;
-              break;
+export function detectNodes(bin: Uint8Array, width: number, height: number, lines: TreeLine[] = []): TreeNode[] {
+  /**
+   * 竖线端点附近的空心圆扫描。
+   * 允许圆环的一小段被竖线穿过，因此不能再用“圆必须是独立连通域”的假设。
+   */
+  const endpointCandidates: Array<{ cx: number; cy: number; r: number; score: number }> = [];
+  const horizontalLines = lines.filter((line) => line.orientation === 'h');
+  const verticalEndpoints = lines
+    .filter((line) => line.orientation === 'v')
+    .flatMap((line) => [
+      { x: line.x1, y: line.y1, widthPx: line.widthPx },
+      { x: line.x2, y: line.y2, widthPx: line.widthPx },
+    ]);
+  // 横竖线交叉处是分支连接，不是圆节点。只扫描竖线没有接入横线的自由端点。
+  const freeEndpoints = verticalEndpoints.filter((endpoint) =>
+    !horizontalLines.some((line) => {
+      const tolerance = Math.max(4, Math.ceil((endpoint.widthPx + line.widthPx) / 2) + 2);
+      return endpoint.x >= Math.min(line.x1, line.x2) - tolerance
+        && endpoint.x <= Math.max(line.x1, line.x2) + tolerance
+        && Math.abs(endpoint.y - line.y1) <= tolerance;
+    }),
+  );
+  const sampleInk = (x: number, y: number): number =>
+    x >= 0 && x < width && y >= 0 && y < height ? bin[y * width + x] : 0;
+  for (const endpoint of freeEndpoints) {
+    const { x: ex, y: ey } = endpoint;
+    let best: { cx: number; cy: number; r: number; score: number } | null = null;
+    const centerStep = 2;
+    for (let dy = -NODE_R_MAX; dy <= NODE_R_MAX; dy += centerStep) {
+      for (let dx = -4; dx <= 4; dx += centerStep) {
+        const cx = ex + dx;
+        const cy = ey + dy;
+        for (let r = NODE_R_MIN; r <= Math.min(NODE_R_MAX, 20); r += 1) {
+          const endpointDistance = Math.hypot(cx - ex, cy - ey);
+          if (endpointDistance > r * 1.6 + 2) continue;
+          let ringHits = 0;
+          let ringTotal = 0;
+          let innerHits = 0;
+          let innerTotal = 0;
+          const quadrantHits = [0, 0, 0, 0];
+          for (let s = 0; s < 32; s += 1) {
+            const theta = (2 * Math.PI * s) / 32;
+            const x = Math.round(cx + r * Math.cos(theta));
+            const y = Math.round(cy + r * Math.sin(theta));
+            ringTotal += 1;
+            // 1px 容错，适配扫描缩放后的断续圆环。
+            const hit = Math.max(
+              sampleInk(x, y),
+              sampleInk(x + 1, y),
+              sampleInk(x - 1, y),
+              sampleInk(x, y + 1),
+              sampleInk(x, y - 1),
+            );
+            ringHits += hit;
+            quadrantHits[Math.floor(s / 8)] += hit;
+          }
+          for (let iy = -Math.floor(r * 0.42); iy <= Math.floor(r * 0.42); iy += 2) {
+            for (let ix = -Math.floor(r * 0.42); ix <= Math.floor(r * 0.42); ix += 2) {
+              if (ix * ix + iy * iy > (r * 0.42) ** 2) continue;
+              innerTotal += 1;
+              innerHits += sampleInk(Math.round(cx + ix), Math.round(cy + iy));
             }
           }
-          ringHits += hit;
-        }
-        const ringCoverage = ringHits / SAMPLES;
-        if (ringCoverage < 0.55) continue;
-        // 内部覆盖率（抽样内盘）
-        let innerHits = 0;
-        let innerTotal = 0;
-        const innerR = r - 3;
-        for (let dy = -innerR; dy <= innerR; dy += 2) {
-          for (let dx = -innerR; dx <= innerR; dx += 2) {
-            if (dx * dx + dy * dy > innerR * innerR) continue;
-            innerTotal++;
-            if (bin[(cy + dy) * width + (cx + dx)]) innerHits++;
+          const ringCoverage = ringTotal ? ringHits / ringTotal : 0;
+          const innerCoverage = innerTotal ? innerHits / innerTotal : 1;
+          const allQuadrantsPresent = quadrantHits.every((hits) => hits >= 4);
+          if (ringCoverage >= 0.55 && innerCoverage <= 0.28 && allQuadrantsPresent) {
+            const axisPenalty = (Math.abs(cx - ex) / Math.max(1, r)) * 0.2;
+            const candidate = { cx, cy, r, score: ringCoverage - innerCoverage - axisPenalty };
+            if (!best || candidate.score > best.score) best = candidate;
           }
         }
-        const innerCoverage = innerTotal > 0 ? innerHits / innerTotal : 1;
-        if (innerCoverage > 0.3) continue;
-        candidates.push({ cx, cy, r, score: ringCoverage - innerCoverage });
-        break; // 该中心取最小匹配半径即可
       }
     }
+    if (best) endpointCandidates.push(best);
   }
-  // NMS：按得分排序，抑制中心距离 < r 的重叠候选
+  // 节点统一由谱系线自由端点驱动，避免“独立圆候选 + 端点候选”在同一处重复输出。
+  const candidates: Array<{ cx: number; cy: number; r: number; score: number }> = endpointCandidates;
   candidates.sort((a, b) => b.score - a.score);
   const kept: typeof candidates = [];
   for (const c of candidates) {
-    const overlap = kept.some((k) => Math.hypot(k.cx - c.cx, k.cy - c.cy) < Math.min(k.r, c.r));
-    if (!overlap) kept.push(c);
-    if (kept.length >= 500) break; // 安全上限
+    if (!kept.some((k) => Math.hypot(k.cx - c.cx, k.cy - c.cy) < Math.max(k.r, c.r) * 1.5)) kept.push(c);
   }
   return kept.map((c) => ({ id: uuid(), cx: c.cx, cy: c.cy, r: c.r, strokePx: 2 }));
 }
@@ -124,12 +156,14 @@ export function detectArtifacts(
   const artifacts: ArtifactStroke[] = [];
   for (const b of boxes) {
     if (b.area < CHAR_MIN_AREA) continue;
+    const aspect = Math.max(b.w, b.h) / Math.max(1, Math.min(b.w, b.h));
     const isCharLike =
       b.w >= CHAR_MIN_SIZE && b.h >= CHAR_MIN_SIZE && b.w <= CHAR_MAX_SIZE && b.h <= CHAR_MAX_SIZE;
-    if (isCharLike) continue; // 字符候选，不算破损
+    if (isCharLike || (aspect < 3 && Math.max(b.w, b.h) < 80)) continue; // 字符与细碎污点不算破损
     // 残留块 → 以包围盒主对角线 + 估算宽度表示
     const longSide = Math.max(b.w, b.h);
     const widthPx = Math.max(1, Math.round(b.area / longSide));
+    if (aspect < 3 || widthPx > 12) continue;
     artifacts.push({
       id: uuid(),
       x1: b.x,

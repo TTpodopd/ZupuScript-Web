@@ -12,6 +12,7 @@ import {
   STORE_KEYSTORE,
   STORE_PAGES,
   STORE_PROJECTS,
+  STORE_RECOGNITION_MEMORY,
   STORE_UNDO,
 } from '@/lib/constants';
 import type { Page, Project } from '@/model/types';
@@ -32,6 +33,21 @@ export interface CacheRecord {
   createdAt: number;
 }
 
+export interface RecognitionMemoryRecord {
+  id: string;
+  fingerprint: string;
+  signature: string;
+  aspectBucket: number;
+  char: string;
+  totalCount: number;
+  manualCount: number;
+  modelCount: number;
+  localCount: number;
+  confidenceSum: number;
+  lastSeen: number;
+  evidenceKeys: string[];
+}
+
 interface ZupuDB extends DBSchema {
   [STORE_PROJECTS]: { key: string; value: Project };
   [STORE_PAGES]: { key: string; value: Page; indexes: { byProject: string } };
@@ -40,6 +56,11 @@ interface ZupuDB extends DBSchema {
   [STORE_CACHE]: { key: string; value: CacheRecord };
   [STORE_BLOBS]: { key: string; value: Blob };
   [STORE_KEYSTORE]: { key: string; value: EncryptedKeyRecord };
+  [STORE_RECOGNITION_MEMORY]: {
+    key: string;
+    value: RecognitionMemoryRecord;
+    indexes: { byFingerprint: string; byAspect: number };
+  };
 }
 
 let dbPromise: Promise<IDBPDatabase<ZupuDB>> | null = null;
@@ -48,16 +69,23 @@ let dbPromise: Promise<IDBPDatabase<ZupuDB>> | null = null;
 export function getDB(): Promise<IDBPDatabase<ZupuDB>> {
   if (!dbPromise) {
     dbPromise = openDB<ZupuDB>(DB_NAME, DB_VERSION, {
-      upgrade(db) {
-        db.createObjectStore(STORE_PROJECTS, { keyPath: 'id' });
-        const pages = db.createObjectStore(STORE_PAGES, { keyPath: 'id' });
-        pages.createIndex('byProject', 'projectId');
-        db.createObjectStore(STORE_UNDO, { keyPath: 'pageId' });
-        const audit = db.createObjectStore(STORE_AUDIT, { keyPath: 'id' });
-        audit.createIndex('byTime', 'ts');
-        db.createObjectStore(STORE_CACHE, { keyPath: 'key' });
-        db.createObjectStore(STORE_BLOBS);
-        db.createObjectStore(STORE_KEYSTORE, { keyPath: 'providerId' });
+      upgrade(db, oldVersion) {
+        if (oldVersion < 1) {
+          db.createObjectStore(STORE_PROJECTS, { keyPath: 'id' });
+          const pages = db.createObjectStore(STORE_PAGES, { keyPath: 'id' });
+          pages.createIndex('byProject', 'projectId');
+          db.createObjectStore(STORE_UNDO, { keyPath: 'pageId' });
+          const audit = db.createObjectStore(STORE_AUDIT, { keyPath: 'id' });
+          audit.createIndex('byTime', 'ts');
+          db.createObjectStore(STORE_CACHE, { keyPath: 'key' });
+          db.createObjectStore(STORE_BLOBS);
+          db.createObjectStore(STORE_KEYSTORE, { keyPath: 'providerId' });
+        }
+        if (oldVersion < 2) {
+          const memory = db.createObjectStore(STORE_RECOGNITION_MEMORY, { keyPath: 'id' });
+          memory.createIndex('byFingerprint', 'fingerprint');
+          memory.createIndex('byAspect', 'aspectBucket');
+        }
       },
     });
   }
@@ -124,6 +152,27 @@ export async function setCache(record: CacheRecord): Promise<void> {
   await (await getDB()).put(STORE_CACHE, record);
 }
 
+/* ---------- 本地识别记忆 ---------- */
+export async function getMemoryByFingerprint(fingerprint: string): Promise<RecognitionMemoryRecord[]> {
+  return (await getDB()).getAllFromIndex(STORE_RECOGNITION_MEMORY, 'byFingerprint', fingerprint);
+}
+
+export async function getMemoryByAspect(aspectBucket: number): Promise<RecognitionMemoryRecord[]> {
+  return (await getDB()).getAllFromIndex(STORE_RECOGNITION_MEMORY, 'byAspect', aspectBucket);
+}
+
+export async function saveMemoryRecord(record: RecognitionMemoryRecord): Promise<void> {
+  await (await getDB()).put(STORE_RECOGNITION_MEMORY, record);
+}
+
+export async function countMemoryRecords(): Promise<number> {
+  return (await getDB()).count(STORE_RECOGNITION_MEMORY);
+}
+
+export async function clearRecognitionMemory(): Promise<void> {
+  await (await getDB()).clear(STORE_RECOGNITION_MEMORY);
+}
+
 /* ---------- Blob 兜底存储（Safari OPFS 受限时降级） ---------- */
 export async function putBlob(key: string, blob: Blob): Promise<void> {
   await (await getDB()).put(STORE_BLOBS, blob, key);
@@ -161,6 +210,7 @@ export async function clearAllStores(): Promise<void> {
     STORE_CACHE,
     STORE_BLOBS,
     STORE_KEYSTORE,
+    STORE_RECOGNITION_MEMORY,
   ] as const;
   const tx = db.transaction(stores, 'readwrite');
   for (const s of stores) {

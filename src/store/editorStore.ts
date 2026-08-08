@@ -5,20 +5,28 @@
  */
 import { create } from 'zustand';
 import { UNDO_LIMIT } from '@/lib/constants';
-import type { CharItem, Page } from '@/model/types';
+import type { BorderRect, CharItem, Page, TagRect, TreeLine, TreeNode } from '@/model/types';
 import { loadUndoStack, saveUndoStack } from '@/storage/db';
+import { learnManualCorrection } from '@/recognize/memory';
 import { useProjectStore } from './projectStore';
 
 /** 编辑命令（before/after 保证可逆） */
 export type EditCommand =
   | { type: 'char.update'; charId: string; before: Partial<CharItem>; after: Partial<CharItem> }
   | { type: 'char.add'; char: CharItem }
+  | { type: 'char.addMany'; chars: CharItem[] }
   | { type: 'char.remove'; char: CharItem }
   | { type: 'char.batchMove'; ids: string[]; dx: number; dy: number }
   | { type: 'char.batchResize'; ids: string[]; beforePts: Record<string, number>; pt: number }
   | { type: 'line.update'; id: string; before: Record<string, number>; after: Record<string, number> }
+  | { type: 'line.add'; line: TreeLine }
+  | { type: 'line.remove'; line: TreeLine }
   | { type: 'node.update'; id: string; before: Record<string, number>; after: Record<string, number> }
-  | { type: 'rect.update'; id: string; before: Record<string, number>; after: Record<string, number> };
+  | { type: 'node.add'; node: TreeNode }
+  | { type: 'node.remove'; node: TreeNode }
+  | { type: 'rect.update'; id: string; before: Record<string, number>; after: Record<string, number> }
+  | { type: 'rect.add'; rect: BorderRect | TagRect; kind: 'border' | 'tag' }
+  | { type: 'rect.remove'; rect: BorderRect | TagRect; kind: 'border' | 'tag' };
 
 export interface ViewTransform {
   scale: number;
@@ -32,6 +40,7 @@ interface EditorState {
   selectedCharIds: string[];
   selectedLineId: string | null;
   selectedNodeId: string | null;
+  selectedRectId: string | null;
   transform: ViewTransform;
   overlayMode: OverlayMode;
   overlayOpacity: number;
@@ -45,6 +54,7 @@ interface EditorState {
   setSelection: (ids: string[]) => void;
   setSelectedLine: (id: string | null) => void;
   setSelectedNode: (id: string | null) => void;
+  setSelectedRect: (id: string | null) => void;
   setTransform: (t: Partial<ViewTransform>) => void;
   setOverlayMode: (m: OverlayMode) => void;
   setOverlayOpacity: (v: number) => void;
@@ -69,6 +79,11 @@ function applyCommandToPage(page: Page, cmd: EditCommand, direction: 'do' | 'und
     }
     case 'char.add': {
       p.chars = direction === 'do' ? [...p.chars, cmd.char] : p.chars.filter((c) => c.id !== cmd.char.id);
+      break;
+    }
+    case 'char.addMany': {
+      const ids = new Set(cmd.chars.map((char) => char.id));
+      p.chars = direction === 'do' ? [...p.chars, ...cmd.chars] : p.chars.filter((char) => !ids.has(char.id));
       break;
     }
     case 'char.remove': {
@@ -105,15 +120,47 @@ function applyCommandToPage(page: Page, cmd: EditCommand, direction: 'do' | 'und
       p.treeLines = p.treeLines.map((l) => (l.id === cmd.id ? { ...l, ...patch } : l));
       break;
     }
+    case 'line.add': {
+      p.treeLines = direction === 'do' ? [...p.treeLines, cmd.line] : p.treeLines.filter((line) => line.id !== cmd.line.id);
+      break;
+    }
+    case 'line.remove': {
+      p.treeLines = direction === 'do' ? p.treeLines.filter((line) => line.id !== cmd.line.id) : [...p.treeLines, cmd.line];
+      break;
+    }
     case 'node.update': {
       const patch = direction === 'do' ? cmd.after : cmd.before;
       p.treeNodes = p.treeNodes.map((n) => (n.id === cmd.id ? { ...n, ...patch } : n));
+      break;
+    }
+    case 'node.add': {
+      p.treeNodes = direction === 'do' ? [...p.treeNodes, cmd.node] : p.treeNodes.filter((node) => node.id !== cmd.node.id);
+      break;
+    }
+    case 'node.remove': {
+      p.treeNodes = direction === 'do' ? p.treeNodes.filter((node) => node.id !== cmd.node.id) : [...p.treeNodes, cmd.node];
       break;
     }
     case 'rect.update': {
       const patch = direction === 'do' ? cmd.after : cmd.before;
       p.borderRects = p.borderRects.map((r) => (r.id === cmd.id ? { ...r, ...patch } : r));
       p.tagRects = p.tagRects.map((r) => (r.id === cmd.id ? { ...r, ...patch } : r));
+      break;
+    }
+    case 'rect.add': {
+      if (cmd.kind === 'border') {
+        p.borderRects = direction === 'do' ? [...p.borderRects, cmd.rect] : p.borderRects.filter((rect) => rect.id !== cmd.rect.id);
+      } else {
+        p.tagRects = direction === 'do' ? [...p.tagRects, cmd.rect] : p.tagRects.filter((rect) => rect.id !== cmd.rect.id);
+      }
+      break;
+    }
+    case 'rect.remove': {
+      if (cmd.kind === 'border') {
+        p.borderRects = direction === 'do' ? p.borderRects.filter((rect) => rect.id !== cmd.rect.id) : [...p.borderRects, cmd.rect];
+      } else {
+        p.tagRects = direction === 'do' ? p.tagRects.filter((rect) => rect.id !== cmd.rect.id) : [...p.tagRects, cmd.rect];
+      }
       break;
     }
   }
@@ -128,6 +175,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   selectedCharIds: [],
   selectedLineId: null,
   selectedNodeId: null,
+  selectedRectId: null,
   transform: { scale: 0.2, offsetX: 0, offsetY: 0 },
   overlayMode: 'split',
   overlayOpacity: 0.5,
@@ -136,9 +184,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   redoStack: [],
   stackPageId: null,
 
-  setSelection: (ids) => set({ selectedCharIds: ids, selectedLineId: null, selectedNodeId: null }),
-  setSelectedLine: (id) => set({ selectedLineId: id, selectedCharIds: id ? [] : get().selectedCharIds, selectedNodeId: null }),
-  setSelectedNode: (id) => set({ selectedNodeId: id, selectedCharIds: id ? [] : get().selectedCharIds, selectedLineId: null }),
+  setSelection: (ids) => set({ selectedCharIds: ids, selectedLineId: null, selectedNodeId: null, selectedRectId: null }),
+  setSelectedLine: (id) => set({ selectedLineId: id, selectedCharIds: id ? [] : get().selectedCharIds, selectedNodeId: null, selectedRectId: null }),
+  setSelectedNode: (id) => set({ selectedNodeId: id, selectedCharIds: id ? [] : get().selectedCharIds, selectedLineId: null, selectedRectId: null }),
+  setSelectedRect: (id) => set({ selectedRectId: id, selectedCharIds: id ? [] : get().selectedCharIds, selectedLineId: null, selectedNodeId: null }),
   setTransform: (t) => set((s) => ({ transform: { ...s.transform, ...t } })),
   setOverlayMode: (m) => set({ overlayMode: m }),
   setOverlayOpacity: (v) => set({ overlayOpacity: v }),
@@ -154,6 +203,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedCharIds: [],
       selectedLineId: null,
       selectedNodeId: null,
+      selectedRectId: null,
       lowConfCursor: 0,
     });
   },
@@ -168,6 +218,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       next = { ...next, status: 'proofread' };
     }
     projectStore.updatePage(page.id, next);
+    if (cmd.type === 'char.update' && typeof cmd.after.text === 'string' && cmd.after.source === 'manual') {
+      void learnManualCorrection(next, cmd.charId, cmd.after.text).catch(() => undefined);
+    }
     set((s) => {
       const undoStack = [...s.undoStack, cmd].slice(-UNDO_LIMIT);
       persistStacks(page.id, undoStack, []);

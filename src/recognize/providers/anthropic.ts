@@ -14,6 +14,7 @@ import type {
 } from '../types';
 import { buildGridUserPrompt, GRID_RESPONSE_SCHEMA, PAGE_RESPONSE_SCHEMA, PAGE_USER_PROMPT, SYSTEM_PROMPT } from '../prompt';
 import { TOKENS_PER_CHAR } from '@/lib/constants';
+import { routeThroughProxy } from './endpoint';
 
 const DEFAULT_ENDPOINT = 'https://api.anthropic.com';
 
@@ -33,7 +34,7 @@ async function callAnthropic(
   charCount: number,
 ): Promise<{ json: unknown; usage?: { promptTokens: number; completionTokens: number } }> {
   if (!cfg.apiKey) throw new Error('未配置 Anthropic API Key');
-  const base = (cfg.proxyUrl || cfg.endpoint || DEFAULT_ENDPOINT).replace(/\/$/, '');
+  const base = (cfg.endpoint || DEFAULT_ENDPOINT).replace(/\/$/, '');
   const maxTokens = Math.max(2048, charCount * TOKENS_PER_CHAR);
   const body = {
     model: cfg.model,
@@ -58,7 +59,7 @@ async function callAnthropic(
     ],
     tool_choice: { type: 'tool', name: toolName },
   };
-  const res = await fetch(`${base}/v1/messages`, {
+  const res = await fetch(routeThroughProxy(cfg.proxyUrl, `${base}/v1/messages`), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -96,6 +97,8 @@ function parseItems(json: unknown): RecognizedItem[] {
       char: it.char === null || it.char === undefined ? null : String(it.char),
       confidence: Math.max(0, Math.min(1, Number(it.confidence) || 0)),
       note: it.note as RecognizedItem['note'],
+      simplified: typeof it.simplified === 'string' ? it.simplified : undefined,
+      candidates: Array.isArray(it.candidates) ? it.candidates.map(String).slice(0, 3) : undefined,
     };
   });
 }
@@ -114,7 +117,7 @@ export const anthropicProvider: LLMProvider = {
     const { json, usage } = await callAnthropic(
       cfg,
       req.batch.imageBase64Png,
-      buildGridUserPrompt(cols, rows, req.batch.ids.length),
+      req.promptOverride ?? buildGridUserPrompt(cols, rows, req.batch.ids.length),
       'submit_grid_recognition',
       GRID_RESPONSE_SCHEMA,
       req.signal,
@@ -128,7 +131,7 @@ export const anthropicProvider: LLMProvider = {
     const { json, usage } = await callAnthropic(
       cfg,
       req.pageImageBase64,
-      PAGE_USER_PROMPT,
+      req.promptOverride ?? PAGE_USER_PROMPT,
       'submit_page_recognition',
       PAGE_RESPONSE_SCHEMA,
       req.signal,

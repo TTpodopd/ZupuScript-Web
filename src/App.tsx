@@ -15,15 +15,12 @@ import ProjectListPage from '@/ui/ProjectListPage';
 import ImportPage from '@/ui/ImportPage';
 import AnalyzePage from '@/ui/AnalyzePage';
 import EditorPage from '@/ui/EditorPage';
-import ExportPage from '@/ui/ExportPage';
 import SettingsDialog from '@/ui/SettingsDialog';
 
 const NAV: Array<{ id: ViewId; label: string }> = [
   { id: 'projects', label: '项目' },
-  { id: 'import', label: '导入' },
-  { id: 'analyze', label: '分析' },
-  { id: 'editor', label: '校对' },
-  { id: 'export', label: '导出' },
+  { id: 'import', label: '开始' },
+  { id: 'editor', label: '结果画布' },
 ];
 
 export default function App() {
@@ -31,6 +28,7 @@ export default function App() {
   const { darkMode, toggleDarkMode, privacyMode } = useSettingsStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const forcedLocal = isForcedLocal();
+  const activeView = view === 'export' ? 'editor' : view;
 
   useEffect(() => {
     if (!loaded) void loadFromDB();
@@ -43,24 +41,24 @@ export default function App() {
   return (
     <div className="flex min-h-screen flex-col">
       {/* 顶栏：宣纸底 + 柔和下边框 */}
-      <header className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-3 border-b bg-card/80 px-6 backdrop-blur-sm">
+      <header className="sticky top-0 z-40 flex min-h-16 shrink-0 flex-wrap items-center gap-2 border-b bg-card/80 px-3 py-2 backdrop-blur-sm sm:h-16 sm:flex-nowrap sm:gap-3 sm:px-6 sm:py-0">
         {/* 品牌：朱砂印章 + 名称 */}
-        <div className="mr-3 flex items-center gap-2.5">
+        <div className="mr-auto flex items-center gap-2.5 sm:mr-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground shadow-soft">
             谱
           </div>
-          <span className="text-lg font-semibold tracking-wide">{APP_NAME}</span>
+          <span className="hidden text-lg font-semibold tracking-wide sm:inline">{APP_NAME}</span>
         </div>
 
         {/* 导航：胶囊式切换 */}
-        <nav className="flex items-center gap-0.5 rounded-full bg-muted/60 p-1" aria-label="主导航">
+        <nav className="order-3 flex w-full items-center justify-center gap-0.5 rounded-full bg-muted/60 p-1 sm:order-none sm:w-auto" aria-label="主导航">
           {NAV.map((n) => (
             <button
               key={n.id}
               onClick={() => setView(n.id)}
               className={cn(
-                'rounded-full px-4 py-1.5 text-sm transition-all duration-200',
-                view === n.id
+                'rounded-full px-3 py-1.5 text-sm transition-all duration-200 sm:px-4',
+                activeView === n.id
                   ? 'bg-card font-medium text-foreground shadow-soft'
                   : 'text-muted-foreground hover:text-foreground',
                 n.id !== 'projects' && !currentProjectId && 'pointer-events-none opacity-40',
@@ -73,13 +71,13 @@ export default function App() {
 
         {/* 隐私徽号 */}
         <span
-          className="ml-2 rounded-full border bg-secondary/50 px-2.5 py-1 text-xs text-secondary-foreground"
+          className="ml-2 hidden rounded-full border bg-secondary/50 px-2.5 py-1 text-xs text-secondary-foreground lg:inline-flex"
           title="当前隐私模式 / 本次会话已上行图片数"
         >
           {forcedLocal ? 'A 锁定' : `模式 ${privacyMode}`} · 上行 {getSessionUploads()}
         </span>
 
-        <div className="flex-1" />
+        <div className="hidden flex-1 sm:block" />
 
         {/* 右侧操作 */}
         <div className="flex items-center gap-1">
@@ -94,11 +92,10 @@ export default function App() {
 
       {/* 主内容区 */}
       <main className="min-h-0 flex-1">
-        {view === 'projects' && <ProjectListPage />}
-        {view === 'import' && <ImportPage />}
-        {view === 'analyze' && <AnalyzePage />}
-        {view === 'editor' && <EditorPage />}
-        {view === 'export' && <ExportPage />}
+        {activeView === 'projects' && <ProjectListPage />}
+        {activeView === 'import' && <ImportPage />}
+        {activeView === 'analyze' && <AnalyzePage />}
+        {activeView === 'editor' && <EditorPage />}
       </main>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />

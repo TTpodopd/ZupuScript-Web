@@ -40,6 +40,8 @@ export interface RecognizeBatchRequest {
   pageImageBase64?: string;
   /** C 模式提示用的行列描述 */
   pageHint?: string;
+  /** 二次综合校验时附带的初次模型输出，不改变图像坐标。 */
+  promptOverride?: string;
   signal: AbortSignal;
 }
 
@@ -82,6 +84,7 @@ export interface LLMProvider {
   recognize(req: RecognizeBatchRequest, cfg: ProviderConfig): Promise<RecognizeBatchResult>;
   /** C 模式：整页识别（默认实现可复用 recognize，provider 可自行覆盖） */
   recognizePageImage?(req: RecognizeBatchRequest, cfg: ProviderConfig): Promise<RecognizePageResult>;
+  testConnection?(cfg: ProviderConfig): Promise<void>;
   /** 粗略成本估算（元/字），用于调用前预估 */
   estimateCost(charCount: number): number;
 }

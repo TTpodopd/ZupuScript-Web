@@ -221,13 +221,22 @@ def draw_border_rects(rects):
         scribus.setLineColor("None", item)
         scribus.setLineWidth(0.0, item)
 
+def draw_white_corner(x1, y1, x2, y2, width_px, name):
+    item = scribus.createLine(mm(x1), mm(y1), mm(x2), mm(y2), name)
+    scribus.setLineColor(WHITE, item)
+    scribus.setLineWidth(pt(width_px), item)
+
 def draw_tag_rects(rects):
-    # 装饰块：实心黑块（内部白色图形请后续在 Scribus 内手工微调）
+    # 装饰块：实心黑块，并复原 v7 黑标底部白色折角
     for (x, y, w, h, name) in rects:
         item = scribus.createRect(mm(x), mm(y), mm(w), mm(h), name)
         scribus.setFillColor(BLACK, item)
         scribus.setLineColor("None", item)
         scribus.setLineWidth(0.0, item)
+        if w >= 40 and h >= 40:
+            y0 = y + h * 0.77
+            draw_white_corner(x + w * 0.12, y0 + h * 0.23, x + w * 0.50, y0, max(1.0, w * 0.10), name + "_白角左")
+            draw_white_corner(x + w * 0.50, y0, x + w * 0.88, y0 + h * 0.23, max(1.0, w * 0.10), name + "_白角右")
 
 def draw_tree_lines(lines):
     for (x1, y1, x2, y2, w_px, name) in lines:

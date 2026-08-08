@@ -8,7 +8,7 @@ import { CONFIDENCE_THRESHOLD, PT_PER_MM } from '@/lib/constants';
 import type { CharItem, Page } from '@/model/types';
 import { useEditorStore } from '@/store/editorStore';
 import { useProjectStore } from '@/store/projectStore';
-import { ptToPx } from '@/verify/preview';
+import { PREVIEW_FONT_FAMILY, PREVIEW_FONT_SCALE, ptToPx } from '@/verify/preview';
 import { uuid } from '@/lib/utils';
 import { Button } from '@/ui/components/ui/button';
 import { Input } from '@/ui/components/ui/input';
@@ -22,11 +22,19 @@ interface EditPopup {
   pt: number;
 }
 
+interface CharDragOrigin {
+  cx: number;
+  cy: number;
+  bbox: [number, number, number, number];
+}
+
 type DragState =
-  | { kind: 'moveChars'; startX: number; startY: number; lastX: number; lastY: number }
+  | { kind: 'moveChars'; startX: number; startY: number; lastX: number; lastY: number; orig: Record<string, CharDragOrigin> }
   | { kind: 'rubber'; startX: number; startY: number; curX: number; curY: number }
   | { kind: 'lineEndpoint'; lineId: string; end: 'p1' | 'p2'; orig: { x1: number; y1: number; x2: number; y2: number } }
+  | { kind: 'moveLine'; lineId: string; startX: number; startY: number; orig: { x1: number; y1: number; x2: number; y2: number } }
   | { kind: 'moveNode'; nodeId: string; dx: number; dy: number; orig: { cx: number; cy: number } }
+  | { kind: 'moveRect'; rectId: string; dx: number; dy: number; orig: { x: number; y: number } }
   | { kind: 'pan'; lastX: number; lastY: number }
   | null;
 
@@ -43,11 +51,13 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
     selectedCharIds,
     selectedLineId,
     selectedNodeId,
+    selectedRectId,
     transform,
     setTransform,
     setSelection,
     setSelectedLine,
     setSelectedNode,
+    setSelectedRect,
     apply,
   } = useEditorStore();
 
@@ -76,6 +86,18 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
     ctx.fillRect(0, 0, w, h);
     ctx.fillStyle = '#000000';
     for (const r of [...page.borderRects, ...page.tagRects]) ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineCap = 'butt';
+    for (const r of page.tagRects) {
+      if (r.w < 40 || r.h < 40) continue;
+      const y = r.y + r.h * 0.77;
+      ctx.lineWidth = Math.max(1, r.w * 0.1);
+      ctx.beginPath();
+      ctx.moveTo(r.x + r.w * 0.12, y + r.h * 0.23);
+      ctx.lineTo(r.x + r.w * 0.5, y);
+      ctx.lineTo(r.x + r.w * 0.88, y + r.h * 0.23);
+      ctx.stroke();
+    }
     ctx.strokeStyle = '#000000';
     for (const l of page.treeLines) {
       ctx.lineWidth = Math.max(1, l.widthPx);
@@ -88,6 +110,11 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
       ctx.lineWidth = Math.max(1, n.strokePx);
       ctx.beginPath();
       ctx.arc(n.cx, n.cy, n.r, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+      ctx.strokeStyle = '#000000';
+      ctx.beginPath();
+      ctx.arc(n.cx, n.cy, n.r, 0, Math.PI * 2);
       ctx.stroke();
     }
     ctx.textAlign = 'center';
@@ -96,7 +123,7 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
     const pxPerMm = page.calibration.pxPerMm || 1;
     for (const c of page.chars) {
       if (!c.text || c.pt <= 0) continue;
-      ctx.font = `${ptToPx(c.pt, pxPerMm)}px "Noto Serif CJK SC", "SimSun", serif`;
+      ctx.font = `500 ${ptToPx(c.pt, pxPerMm) * PREVIEW_FONT_SCALE}px ${PREVIEW_FONT_FAMILY}`;
       ctx.fillText(c.text, c.cx, c.cy);
     }
   }, [page]);
@@ -159,6 +186,12 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
       ctx.arc(selNode.cx, selNode.cy, selNode.r + 3, 0, Math.PI * 2);
       ctx.stroke();
     }
+    const selRect = [...page.borderRects, ...page.tagRects].find((r) => r.id === selectedRectId);
+    if (selRect) {
+      ctx.strokeStyle = 'rgba(37,99,235,1)';
+      ctx.lineWidth = 2 / transform.scale;
+      ctx.strokeRect(selRect.x - 3, selRect.y - 3, selRect.w + 6, selRect.h + 6);
+    }
     // 框选矩形
     const drag = dragRef.current;
     if (drag?.kind === 'rubber') {
@@ -173,7 +206,7 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
       ctx.setLineDash([]);
     }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-  }, [page, transform, selectedCharIds, selectedLineId, selectedNodeId, size, rebuildCache]);
+  }, [page, transform, selectedCharIds, selectedLineId, selectedNodeId, selectedRectId, size, rebuildCache]);
 
   /* ---------- 坐标换算与命中测试 ---------- */
   const toImage = useCallback(
@@ -204,8 +237,22 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
     [page.chars, transform.scale],
   );
 
+  const hitLine = useCallback(
+    (x: number, y: number) =>
+      page.treeLines.find((line) => {
+        const tol = Math.max(6 / transform.scale, line.widthPx);
+        if (line.orientation === 'h') {
+          return Math.abs(y - line.y1) < tol && x >= Math.min(line.x1, line.x2) - tol && x <= Math.max(line.x1, line.x2) + tol;
+        }
+        return Math.abs(x - line.x1) < tol && y >= Math.min(line.y1, line.y2) - tol && y <= Math.max(line.y1, line.y2) + tol;
+      }) ?? null,
+    [page.treeLines, transform.scale],
+  );
+
   /* ---------- 鼠标交互 ---------- */
-  const onMouseDown = (e: React.MouseEvent) => {
+  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = e.currentTarget;
+    canvas.setPointerCapture(e.pointerId);
     const [x, y] = toImage(e.clientX, e.clientY);
     if (e.button === 1 || e.button === 2 || e.altKey) {
       dragRef.current = { kind: 'pan', lastX: e.clientX, lastY: e.clientY };
@@ -227,15 +274,17 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
       }
     }
     // 线段本体
-    const hitLine = page.treeLines.find((l) => {
-      const tol = Math.max(6 / transform.scale, l.widthPx);
-      if (l.orientation === 'h') {
-        return Math.abs(y - l.y1) < tol && x >= Math.min(l.x1, l.x2) - tol && x <= Math.max(l.x1, l.x2) + tol;
-      }
-      return Math.abs(x - l.x1) < tol && y >= Math.min(l.y1, l.y2) - tol && y <= Math.max(l.y1, l.y2) + tol;
-    });
-    if (hitLine && !hitChar(x, y)) {
-      setSelectedLine(hitLine.id);
+    const hitLineItem = hitLine(x, y);
+    if (hitLineItem && !hitChar(x, y)) {
+      setSelectedLine(hitLineItem.id);
+      dragRef.current = {
+        kind: 'moveLine',
+        lineId: hitLineItem.id,
+        startX: x,
+        startY: y,
+        orig: { x1: hitLineItem.x1, y1: hitLineItem.y1, x2: hitLineItem.x2, y2: hitLineItem.y2 },
+      };
+      canvas.style.cursor = 'grabbing';
       return;
     }
     // 节点圆
@@ -245,15 +294,33 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
       dragRef.current = { kind: 'moveNode', nodeId: hitNode.id, dx: hitNode.cx - x, dy: hitNode.cy - y, orig: { cx: hitNode.cx, cy: hitNode.cy } };
       return;
     }
+    const hitRect = [...page.borderRects, ...page.tagRects].find((r) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h);
+    if (hitRect && !hitChar(x, y)) {
+      setSelectedRect(hitRect.id);
+      dragRef.current = { kind: 'moveRect', rectId: hitRect.id, dx: hitRect.x - x, dy: hitRect.y - y, orig: { x: hitRect.x, y: hitRect.y } };
+      return;
+    }
     // 字符
     const c = hitChar(x, y);
     if (c) {
+      let movingIds = selectedCharIds;
       if (e.shiftKey) {
-        setSelection(selectedCharIds.includes(c.id) ? selectedCharIds.filter((i) => i !== c.id) : [...selectedCharIds, c.id]);
+        movingIds = selectedCharIds.includes(c.id) ? selectedCharIds.filter((i) => i !== c.id) : [...selectedCharIds, c.id];
+        setSelection(movingIds);
       } else if (!selectedCharIds.includes(c.id)) {
-        setSelection([c.id]);
+        movingIds = [c.id];
+        setSelection(movingIds);
       }
-      dragRef.current = { kind: 'moveChars', startX: x, startY: y, lastX: x, lastY: y };
+      const movingIdSet = new Set(movingIds);
+      const orig = Object.fromEntries(
+        page.chars
+          .filter((char) => movingIdSet.has(char.id))
+          .map((char) => [char.id, { cx: char.cx, cy: char.cy, bbox: [...char.bbox] as [number, number, number, number] }]),
+      );
+      if (Object.keys(orig).length > 0) {
+        dragRef.current = { kind: 'moveChars', startX: x, startY: y, lastX: x, lastY: y, orig };
+        canvas.style.cursor = 'grabbing';
+      }
       return;
     }
     // 空白：框选
@@ -261,9 +328,14 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
     dragRef.current = { kind: 'rubber', startX: x, startY: y, curX: x, curY: y };
   };
 
-  const onMouseMove = (e: React.MouseEvent) => {
+  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = e.currentTarget;
     const drag = dragRef.current;
-    if (!drag) return;
+    if (!drag) {
+      const [x, y] = toImage(e.clientX, e.clientY);
+      canvas.style.cursor = hitChar(x, y) || hitLine(x, y) ? 'grab' : 'crosshair';
+      return;
+    }
     if (drag.kind === 'pan') {
       setTransform({ offsetX: transform.offsetX + e.clientX - drag.lastX, offsetY: transform.offsetY + e.clientY - drag.lastY });
       drag.lastX = e.clientX;
@@ -272,9 +344,49 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
     }
     const [x, y] = toImage(e.clientX, e.clientY);
     if (drag.kind === 'moveChars') {
-      // 拖动中仅记录最新位置（不落命令），mouseup 时一次性提交 batchMove
+      const dx = Math.round(x - drag.startX);
+      const dy = Math.round(y - drag.startY);
       drag.lastX = x;
       drag.lastY = y;
+      const currentPage = useProjectStore.getState().currentPage();
+      if (currentPage?.id === page.id) {
+        useProjectStore.getState().updatePage(page.id, {
+          chars: currentPage.chars.map((char) => {
+            const origin = drag.orig[char.id];
+            if (!origin) return char;
+            return {
+              ...char,
+              cx: origin.cx + dx,
+              cy: origin.cy + dy,
+              bbox: [
+                origin.bbox[0] + dx,
+                origin.bbox[1] + dy,
+                origin.bbox[2] + dx,
+                origin.bbox[3] + dy,
+              ],
+            };
+          }),
+        });
+      }
+    } else if (drag.kind === 'moveLine') {
+      const dx = Math.round(x - drag.startX);
+      const dy = Math.round(y - drag.startY);
+      const currentPage = useProjectStore.getState().currentPage();
+      if (currentPage?.id === page.id) {
+        useProjectStore.getState().updatePage(page.id, {
+          treeLines: currentPage.treeLines.map((line) =>
+            line.id === drag.lineId
+              ? {
+                  ...line,
+                  x1: drag.orig.x1 + dx,
+                  y1: drag.orig.y1 + dy,
+                  x2: drag.orig.x2 + dx,
+                  y2: drag.orig.y2 + dy,
+                }
+              : line,
+          ),
+        });
+      }
     } else if (drag.kind === 'rubber') {
       drag.curX = x;
       drag.curY = y;
@@ -292,19 +404,39 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
       useProjectStore.getState().updatePage(page.id, {
         treeNodes: page.treeNodes.map((v) => (v.id === drag.nodeId ? { ...v, cx: nx, cy: ny } : v)),
       });
+    } else if (drag.kind === 'moveRect') {
+      const nx = x + drag.dx;
+      const ny = y + drag.dy;
+      useProjectStore.getState().updatePage(page.id, {
+        borderRects: page.borderRects.map((v) => (v.id === drag.rectId ? { ...v, x: nx, y: ny } : v)),
+        tagRects: page.tagRects.map((v) => (v.id === drag.rectId ? { ...v, x: nx, y: ny } : v)),
+      });
     }
   };
 
-  const onMouseUp = (e: React.MouseEvent) => {
+  const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = e.currentTarget;
+    if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
     const drag = dragRef.current;
     dragRef.current = null;
+    canvas.style.cursor = 'crosshair';
     if (!drag) return;
     const [x, y] = toImage(e.clientX, e.clientY);
     if (drag.kind === 'moveChars') {
       const dx = Math.round(x - drag.startX);
       const dy = Math.round(y - drag.startY);
-      if ((dx !== 0 || dy !== 0) && selectedCharIds.length > 0) {
-        apply({ type: 'char.batchMove', ids: selectedCharIds, dx, dy });
+      const ids = Object.keys(drag.orig);
+      const currentPage = useProjectStore.getState().currentPage();
+      if (currentPage?.id === page.id) {
+        useProjectStore.getState().updatePage(page.id, {
+          chars: currentPage.chars.map((char) => {
+            const origin = drag.orig[char.id];
+            return origin ? { ...char, cx: origin.cx, cy: origin.cy, bbox: [...origin.bbox] } : char;
+          }),
+        });
+      }
+      if ((dx !== 0 || dy !== 0) && ids.length > 0) {
+        apply({ type: 'char.batchMove', ids, dx, dy });
       }
     } else if (drag.kind === 'rubber') {
       const x0 = Math.min(drag.startX, drag.curX);
@@ -316,6 +448,16 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
           .filter((c) => c.cx >= x0 && c.cx <= x1 && c.cy >= y0 && c.cy <= y1)
           .map((c) => c.id);
         setSelection(ids);
+      }
+    } else if (drag.kind === 'moveLine') {
+      const currentPage = useProjectStore.getState().currentPage();
+      const cur = currentPage?.treeLines.find((line) => line.id === drag.lineId);
+      if (cur) {
+        const before = { ...drag.orig };
+        const after = { x1: cur.x1, y1: cur.y1, x2: cur.x2, y2: cur.y2 };
+        if (JSON.stringify(before) !== JSON.stringify(after)) {
+          apply({ type: 'line.update', id: drag.lineId, before, after });
+        }
       }
     } else if (drag.kind === 'lineEndpoint') {
       // 提交整条拖拽为单条撤销命令（after 为绝对值，apply 幂等）
@@ -333,6 +475,11 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
       const cur = page.treeNodes.find((v) => v.id === drag.nodeId);
       if (cur && (cur.cx !== drag.orig.cx || cur.cy !== drag.orig.cy)) {
         apply({ type: 'node.update', id: drag.nodeId, before: { cx: drag.orig.cx, cy: drag.orig.cy }, after: { cx: cur.cx, cy: cur.cy } });
+      }
+    } else if (drag.kind === 'moveRect') {
+      const cur = [...page.borderRects, ...page.tagRects].find((r) => r.id === drag.rectId);
+      if (cur && (cur.x !== drag.orig.x || cur.y !== drag.orig.y)) {
+        apply({ type: 'rect.update', id: drag.rectId, before: { x: drag.orig.x, y: drag.orig.y }, after: { x: cur.x, y: cur.y } });
       }
     }
   };
@@ -398,9 +545,10 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
       <canvas
         ref={canvasRef}
         className="absolute inset-0 cursor-crosshair"
-        onMouseDown={onMouseDown}
-        onMouseMove={onMouseMove}
-        onMouseUp={onMouseUp}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
         onDoubleClick={onDoubleClick}
         onWheel={onWheel}
         onContextMenu={(e) => e.preventDefault()}
@@ -439,6 +587,9 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
           </div>
         </div>
       )}
+      <div className="pointer-events-none absolute right-2 top-2 rounded bg-blue-700/80 px-2 py-1 text-xs text-white">
+        识别结果 · 可编辑
+      </div>
       <div className="pointer-events-none absolute bottom-2 left-2 rounded bg-black/50 px-2 py-1 text-xs text-white">
         缩放 {(transform.scale * 100).toFixed(0)}% · 双击改字/加字 · 拖动挪位 · Alt+拖动平移 · 滚轮缩放 · 字号换算
         1mm={PT_PER_MM.toFixed(3)}pt

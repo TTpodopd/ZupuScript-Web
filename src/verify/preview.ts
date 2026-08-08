@@ -5,6 +5,10 @@
 import { MM_PER_PT } from '@/lib/constants';
 import type { Page } from '@/model/types';
 
+export const PREVIEW_FONT_FAMILY = '"Noto Serif CJK TC", "Source Han Serif TC", "Noto Serif CJK SC", "SimSun", serif';
+/** v7 脚本直接使用 Scribus pt，不额外放大浏览器预览。 */
+export const PREVIEW_FONT_SCALE = 1;
+
 /** 字号 pt → 像素字高（与生成脚本 mm(px) 换算互为逆运算） */
 export function ptToPx(pt: number, pxPerMm: number): number {
   return pt * MM_PER_PT * pxPerMm;
@@ -30,7 +34,22 @@ export function renderPreviewToCanvas(page: Page, canvas: HTMLCanvasElement): vo
   for (const r of [...page.borderRects, ...page.tagRects]) {
     ctx.fillRect(r.x, r.y, r.w, r.h);
   }
+  // v7 黑标底部的白色折角，按黑标矩形相对位置复原。
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineCap = 'butt';
+  for (const r of page.tagRects) {
+    if (r.w < 40 || r.h < 40) continue;
+    const y = r.y + r.h * 0.77;
+    const midX = r.x + r.w * 0.50;
+    ctx.lineWidth = Math.max(1, r.w * 0.10);
+    ctx.beginPath();
+    ctx.moveTo(r.x + r.w * 0.12, y + r.h * 0.23);
+    ctx.lineTo(midX, y);
+    ctx.lineTo(r.x + r.w * 0.88, y + r.h * 0.23);
+    ctx.stroke();
+  }
   // 谱系连线
+  ctx.strokeStyle = '#000000';
   ctx.lineCap = 'butt';
   for (const l of page.treeLines) {
     ctx.lineWidth = Math.max(1, l.widthPx);
@@ -44,10 +63,15 @@ export function renderPreviewToCanvas(page: Page, canvas: HTMLCanvasElement): vo
     ctx.lineWidth = Math.max(1, n.strokePx);
     ctx.beginPath();
     ctx.arc(n.cx, n.cy, n.r, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.strokeStyle = '#000000';
+    ctx.beginPath();
+    ctx.arc(n.cx, n.cy, n.r, 0, Math.PI * 2);
     ctx.stroke();
   }
   // 破损痕迹
-  ctx.strokeStyle = '#000000';
+  ctx.strokeStyle = '#777777';
   for (const a of page.artifacts) {
     ctx.lineWidth = Math.max(1, a.widthPx);
     ctx.beginPath();
@@ -61,8 +85,8 @@ export function renderPreviewToCanvas(page: Page, canvas: HTMLCanvasElement): vo
   ctx.textBaseline = 'middle';
   for (const c of page.chars) {
     if (!c.text || c.pt <= 0) continue;
-    const fontPx = ptToPx(c.pt, pxPerMm);
-    ctx.font = `${fontPx}px "Noto Serif CJK SC", "SimSun", serif`;
+    const fontPx = ptToPx(c.pt, pxPerMm) * PREVIEW_FONT_SCALE;
+    ctx.font = `500 ${fontPx}px ${PREVIEW_FONT_FAMILY}`;
     ctx.fillText(c.text, c.cx, c.cy);
   }
 }

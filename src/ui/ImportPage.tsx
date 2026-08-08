@@ -3,7 +3,7 @@
  * PDF 用 PDF.js 本地拆页渲染（可指定页码范围与渲染 DPI）。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { FolderInput, ImagePlus, Loader2 } from 'lucide-react';
+import { CheckCircle2, FileCode2, FolderInput, ImagePlus, Loader2 } from 'lucide-react';
 import { Button } from '@/ui/components/ui/button';
 import { Input, Label } from '@/ui/components/ui/input';
 import { createEmptyPage } from '@/model/types';
@@ -11,10 +11,11 @@ import { useProjectStore } from '@/store/projectStore';
 import { hasFSAccess, pickDirectory, readImageFilesFromDirectory } from '@/storage/fsaccess';
 import { putImage } from '@/storage/opfs';
 import { naturalCompare, uuid } from '@/lib/utils';
-import { DEFAULT_DPI } from '@/lib/constants';
+import { parseGeneratedScript } from '@/parser/scriptParser';
 
 const IMAGE_RE = /\.(png|jpe?g|webp|tiff?)$/i;
 const PDF_RE = /\.pdf$/i;
+const PDF_RENDER_DPI = 300;
 
 /** 图像文件 → ImageData 尺寸探测（TIFF 等不支持的格式会抛错，由调用方提示） */
 async function probeImage(blob: Blob): Promise<{ width: number; height: number }> {
@@ -77,10 +78,32 @@ export default function ImportPage() {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [pdfRange, setPdfRange] = useState('');
-  const [pdfDpi, setPdfDpi] = useState(DEFAULT_DPI);
   const fileRef = useRef<HTMLInputElement>(null);
+  const scriptRef = useRef<HTMLInputElement>(null);
 
   const appendLog = useCallback((msg: string) => setLog((l) => [...l.slice(-30), msg]), []);
+
+  const importScript = async (file: File) => {
+    if (!currentProjectId) return;
+    setBusy(true);
+    try {
+      const parsed = parseGeneratedScript(await file.text(), file.name);
+      const imported = parsed.map(({ page }, index) => ({
+        ...page,
+        projectId: currentProjectId,
+        index: pages.length + index,
+        source: { ...page.source, name: page.source.name || file.name },
+      }));
+      addPages(imported);
+      appendLog(`已解析脚本 ${file.name}：${imported.length} 个结果页`);
+      setCurrentPage(imported[0]?.id ?? '');
+      setView('editor');
+    } catch (err) {
+      appendLog(`脚本解析失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const importImageFiles = useCallback(
     async (files: File[]) => {
@@ -109,7 +132,11 @@ export default function ImportPage() {
             appendLog(`跳过 ${f.name}：浏览器无法解码（TIFF 请先转 PNG/JPG）`);
           }
         }
-        if (newPages.length > 0) addPages(newPages);
+        if (newPages.length > 0) {
+          addPages(newPages);
+          setCurrentPage(newPages[0].id);
+          setView('analyze');
+        }
       } finally {
         setBusy(false);
       }
@@ -121,9 +148,9 @@ export default function ImportPage() {
     async (file: File) => {
       if (!currentProjectId) return;
       setBusy(true);
-      appendLog(`正在拆分 PDF：${file.name}（DPI=${pdfDpi}）…`);
+      appendLog(`正在拆分 PDF：${file.name}（高精度 ${PDF_RENDER_DPI} DPI）…`);
       try {
-        const rendered = await renderPdfPages(file, pdfRange, pdfDpi, (d, t) => appendLog(`PDF 渲染 ${d}/${t}`));
+        const rendered = await renderPdfPages(file, pdfRange, PDF_RENDER_DPI, (d, t) => appendLog(`PDF 渲染 ${d}/${t}`));
         const newPages = [];
         let index = pages.length;
         for (const r of rendered) {
@@ -134,12 +161,16 @@ export default function ImportPage() {
               uuid(),
               currentProjectId,
               index++,
-              { name: `${file.name} 第${r.pageNo}页`, page: r.pageNo, widthPx: r.width, heightPx: r.height, dpi: pdfDpi },
+              { name: `${file.name} 第${r.pageNo}页`, page: r.pageNo, widthPx: r.width, heightPx: r.height, dpi: PDF_RENDER_DPI },
               imageKey,
             ),
           );
         }
         addPages(newPages);
+        if (newPages.length > 0) {
+          setCurrentPage(newPages[0].id);
+          setView('analyze');
+        }
         appendLog(`PDF 拆页完成：${rendered.length} 页`);
       } catch (err) {
         appendLog(`PDF 处理失败：${err instanceof Error ? err.message : String(err)}`);
@@ -147,7 +178,7 @@ export default function ImportPage() {
         setBusy(false);
       }
     },
-    [currentProjectId, pages.length, pdfRange, pdfDpi, addPages, appendLog],
+    [currentProjectId, pages.length, pdfRange, addPages, appendLog],
   );
 
   const handleFiles = useCallback(
@@ -200,15 +231,17 @@ export default function ImportPage() {
   }
 
   return (
-    <div className="mx-auto max-w-4xl p-8">
-      <h1 className="mb-5 text-2xl font-semibold tracking-wide">导入图像 · {currentProject()?.name}</h1>
+    <div className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
+      <h1 className="mb-5 text-2xl font-semibold tracking-wide sm:text-3xl">导入图像 · {currentProject()?.name}</h1>
 
       {/* 拖拽导入区 */}
       <div
-        className={`mb-6 rounded-2xl border-2 border-dashed p-12 text-center transition-all duration-300 ${
+        className={`mb-5 rounded-2xl border-2 border-dashed p-8 text-center transition-all duration-300 sm:p-10 ${
           dragOver
             ? 'border-primary bg-primary/5 card-shadow-lg'
-            : 'border-border bg-card card-shadow'
+            : pages.length > 0
+              ? 'border-emerald-300 bg-emerald-50/50 card-shadow dark:border-emerald-800 dark:bg-emerald-950/20'
+              : 'border-border bg-card card-shadow'
         }`}
         onDragOver={(e) => {
           e.preventDefault();
@@ -227,13 +260,21 @@ export default function ImportPage() {
         onKeyDown={(e) => e.key === 'Enter' && fileRef.current?.click()}
       >
         <div className={`mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl transition-colors ${
-          dragOver ? 'bg-primary/10' : 'bg-muted/60'
+          dragOver ? 'bg-primary/10' : pages.length > 0 ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300' : 'bg-muted/60'
         }`}>
-          <ImagePlus className={`h-6 w-6 transition-colors ${dragOver ? 'text-primary' : 'text-muted-foreground'}`} />
+          {pages.length > 0 ? (
+            <CheckCircle2 className="h-7 w-7" />
+          ) : (
+            <ImagePlus className={`h-6 w-6 transition-colors ${dragOver ? 'text-primary' : 'text-muted-foreground'}`} />
+          )}
         </div>
-        <p className="text-sm font-medium">拖入图像 / PDF，或点击选择文件</p>
+        <p className="text-sm font-medium">
+          {pages.length > 0 ? `资料上传完成 · ${pages.length} 页已就绪` : '拖入图像 / PDF，或点击选择文件'}
+        </p>
         <p className="mt-1.5 text-xs text-muted-foreground">
-          支持 PNG / JPG / WebP / PDF，也可以直接 Ctrl+V 粘贴剪切板图像
+          {pages.length > 0
+            ? '可继续拖入或点击添加更多资料；确认无误后开始高精度分析'
+            : '支持 PNG / JPG / WebP / PDF，也可以直接 Ctrl+V 粘贴剪切板图像'}
         </p>
         <input
           ref={fileRef}
@@ -248,65 +289,86 @@ export default function ImportPage() {
         />
       </div>
 
-      {/* PDF 参数 + 文件夹导入 */}
-      <div className="mb-6 flex flex-wrap items-end gap-3">
-        <div>
-          <Label htmlFor="pdf-range">PDF 页码范围</Label>
+      {/* 辅助导入方式 */}
+      <div className="mb-4 rounded-2xl border bg-card p-4 card-shadow">
+        <div className="mb-3">
+          <h2 className="text-sm font-medium">其他导入方式</h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">PDF 可指定页码范围；也可以批量读取文件夹或直接打开 Scribus 脚本。</p>
+        </div>
+        <div className="grid gap-3 md:grid-cols-[minmax(180px,0.8fr)_minmax(220px,1fr)_minmax(220px,1fr)] md:items-end">
+          <div className="min-w-0">
+            <Label htmlFor="pdf-range">PDF 页码范围</Label>
           <Input
             id="pdf-range"
             value={pdfRange}
             onChange={(e) => setPdfRange(e.target.value)}
             placeholder="如 1-3,5（留空全部）"
-            className="w-36 rounded-xl"
+              className="w-full rounded-xl"
           />
-        </div>
-        <div>
-          <Label htmlFor="pdf-dpi">渲染 DPI</Label>
-          <Input
-            id="pdf-dpi"
-            type="number"
-            value={pdfDpi}
-            onChange={(e) => setPdfDpi(Math.max(72, parseInt(e.target.value, 10) || DEFAULT_DPI))}
-            className="w-24 rounded-xl"
-          />
-        </div>
-        {hasFSAccess() && (
-          <Button variant="outline" onClick={() => void handleFolder()} disabled={busy} className="rounded-xl">
-            <FolderInput className="h-4 w-4" /> 从文件夹批量导入
+          </div>
+          {hasFSAccess() ? (
+            <Button variant="outline" onClick={() => void handleFolder()} disabled={busy} className="w-full rounded-xl">
+              <FolderInput className="h-4 w-4" /> 从文件夹批量导入
+            </Button>
+          ) : (
+            <div />
+          )}
+          <Button variant="outline" onClick={() => scriptRef.current?.click()} disabled={busy} className="w-full rounded-xl">
+            <FileCode2 className="h-4 w-4" /> 导入脚本到画布
           </Button>
-        )}
-        {busy && <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />}
-        <div className="flex-1" />
-        <Button onClick={() => setView('analyze')} disabled={pages.length === 0} className="rounded-xl">
-          前往分析 →
-        </Button>
+        </div>
+        <input
+          ref={scriptRef}
+          type="file"
+          accept=".py,.txt,text/x-python,text/plain"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void importScript(file);
+            e.target.value = '';
+          }}
+        />
+      </div>
+
+      <div className="mb-6 rounded-2xl border border-primary/20 bg-primary/5 p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium text-foreground">{pages.length > 0 ? `${pages.length} 页资料已准备完成` : '请先上传需要处理的资料'}</p>
+            <p className="mt-1 text-xs text-muted-foreground">开始后自动完成去斜、增强、版面检测和字符分割，无需选择算法参数。</p>
+          </div>
+          {busy && <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" />}
+          <Button onClick={() => setView(pages.some((p) => p.chars.length > 0) ? 'editor' : 'analyze')} disabled={pages.length === 0 || busy} className="w-full shrink-0 rounded-xl sm:w-auto">
+            {pages.some((p) => p.chars.length > 0) ? '打开结果画布 →' : '开始高精度分析 →'}
+          </Button>
+        </div>
       </div>
 
       {/* 已导入页面列表 */}
       <h2 className="mb-3 text-sm font-medium">已导入页面（{pages.length}）</h2>
-      <ul className="mb-6 max-h-64 space-y-1 overflow-y-auto rounded-xl border bg-card p-2 card-shadow">
-        {pages.map((p) => (
-          <li key={p.id} className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-accent">
-            <span className="w-8 text-muted-foreground">#{p.index + 1}</span>
-            <button className="flex-1 truncate text-left" onClick={() => setCurrentPage(p.id)} title={p.source.name}>
-              {p.source.name}
-            </button>
-            <span className="text-xs text-muted-foreground">
-              {p.source.widthPx}×{p.source.heightPx}
-            </span>
-            <Button size="sm" variant="ghost" onClick={() => void removePage(p.id)} aria-label="删除本页" className="rounded-lg text-destructive hover:bg-destructive/10">
-              删除
-            </Button>
-          </li>
-        ))}
-      </ul>
-
-      {/* 操作日志 */}
-      {log.length > 0 && (
-        <pre className="max-h-32 overflow-y-auto rounded-xl bg-muted/60 p-4 text-xs text-muted-foreground code-font">
-          {log.join('\n')}
-        </pre>
+      {pages.length === 0 ? (
+        <div className="mb-6 flex items-center gap-3 rounded-xl border border-dashed bg-card/70 px-4 py-4 text-sm text-muted-foreground">
+          <ImagePlus className="h-5 w-5 shrink-0" />
+          <span>还没有页面。拖入图像、选择 PDF，或导入 Scribus 脚本后，页面会显示在这里。</span>
+        </div>
+      ) : (
+        <ul className="mb-6 max-h-64 space-y-1 overflow-y-auto rounded-xl border bg-card p-2 card-shadow">
+          {pages.map((p) => (
+            <li key={p.id} className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-accent">
+              <span className="w-8 shrink-0 text-muted-foreground">#{p.index + 1}</span>
+              <button className="min-w-0 flex-1 truncate text-left" onClick={() => setCurrentPage(p.id)} title={p.source.name}>
+                {p.source.name}
+              </button>
+              <span className="hidden shrink-0 text-xs text-muted-foreground sm:inline">
+                {p.source.widthPx}×{p.source.heightPx}
+              </span>
+              <Button size="sm" variant="ghost" onClick={() => void removePage(p.id)} aria-label="删除本页" className="shrink-0 rounded-lg text-destructive hover:bg-destructive/10">
+                删除
+              </Button>
+            </li>
+          ))}
+        </ul>
       )}
+
     </div>
   );
 }

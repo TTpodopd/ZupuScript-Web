@@ -99,6 +99,59 @@ export interface RectDetectResult {
   rectMask: Uint8Array;
 }
 
+function projectionBands(bin: Uint8Array, width: number, height: number, axis: 'h' | 'v', minCoverage: number): Array<{ start: number; end: number }> {
+  const length = axis === 'h' ? height : width;
+  const span = axis === 'h' ? width : height;
+  const bands: Array<{ start: number; end: number }> = [];
+  let start = -1;
+  for (let i = 0; i <= length; i += 1) {
+    let ink = 0;
+    if (i < length) {
+      if (axis === 'h') {
+        for (let x = 0; x < width; x += 1) ink += bin[i * width + x];
+      } else {
+        for (let y = 0; y < height; y += 1) ink += bin[y * width + i];
+      }
+    }
+    const isBand = i < length && ink / span >= minCoverage;
+    if (isBand && start < 0) start = i;
+    if (!isBand && start >= 0) {
+      bands.push({ start, end: i });
+      start = -1;
+    }
+  }
+  return bands;
+}
+
+function markRectMask(mask: Uint8Array, width: number, height: number, rect: BorderRect): void {
+  const x0 = Math.max(0, Math.floor(rect.x));
+  const y0 = Math.max(0, Math.floor(rect.y));
+  const x1 = Math.min(width, Math.ceil(rect.x + rect.w));
+  const y1 = Math.min(height, Math.ceil(rect.y + rect.h));
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) mask[y * width + x] = 1;
+  }
+}
+
+function appendRectIfDistinct(
+  rects: BorderRect[],
+  rect: BorderRect,
+  tolerance = { x: 8, y: 8, w: 16, h: 16 },
+): void {
+  if (
+    rects.some(
+      (existing) =>
+        Math.abs(existing.x - rect.x) < tolerance.x &&
+        Math.abs(existing.y - rect.y) < tolerance.y &&
+        Math.abs(existing.w - rect.w) < tolerance.w &&
+        Math.abs(existing.h - rect.h) < tolerance.h,
+    )
+  ) {
+    return;
+  }
+  rects.push(rect);
+}
+
 /**
  * 检测外框实心黑条与装饰块（F3.1/F3.5 第一步）。
  * 粗核开运算（横 80 / 纵 80）取交集区域 → 连通域 → 按长宽比与填充率分类。
@@ -106,25 +159,53 @@ export interface RectDetectResult {
 export function detectRects(bin: Uint8Array, width: number, height: number): RectDetectResult {
   const openH = openingByRunLength(bin, width, height, 'h', KERNEL_H_LEN);
   const openV = openingByRunLength(bin, width, height, 'v', KERNEL_V_LEN);
-  // 交集：同时被横核与纵核保留的像素属于粗实心结构
+  // 只有同时通过横向和纵向开运算的像素才是实心结构。
+  // 使用并集会把任意一条细谱系线误升级为 BorderRect，随后在画布上变成巨型红框。
   const solid = new Uint8Array(bin.length);
   for (let i = 0; i < solid.length; i++) {
-    solid[i] = openH[i] | openV[i];
+    solid[i] = openH[i] & openV[i];
   }
   const { labels, boxes } = connectedComponents(solid, width, height);
   const borderRects: BorderRect[] = [];
   const tagRects: TagRect[] = [];
   const rectMask = new Uint8Array(bin.length);
+
+  // 页面外框通常占据整行/整列的大部分墨迹，投影检测比粗块连通域更稳健，
+  // 也能避免把边框拆成大量“谱系线”。
+  const addProjectionBorder = (axis: 'h' | 'v', band: { start: number; end: number }) => {
+    const minThickness = Math.max(8, Math.round(Math.min(width, height) * 0.004));
+    if (band.end - band.start < minThickness) return;
+    let minX = width;
+    let minY = height;
+    let maxX = 0;
+    let maxY = 0;
+    for (let y = axis === 'h' ? band.start : 0; y < (axis === 'h' ? band.end : height); y += 1) {
+      for (let x = axis === 'v' ? band.start : 0; x < (axis === 'v' ? band.end : width); x += 1) {
+        if (!bin[y * width + x]) continue;
+        minX = Math.min(minX, x); minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+      }
+    }
+    if (maxX <= minX || maxY <= minY) return;
+    const rect = { id: uuid(), x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+    appendRectIfDistinct(borderRects, rect);
+    markRectMask(rectMask, width, height, rect);
+  };
+  // 投影只用于补回覆盖整页的大实心边条；细线由 detectTreeLines 负责。
+  for (const band of projectionBands(bin, width, height, 'h', 0.82)) addProjectionBorder('h', band);
+  for (const band of projectionBands(bin, width, height, 'v', 0.82)) addProjectionBorder('v', band);
   for (const b of boxes) {
     const longSide = Math.max(b.w, b.h);
     const shortSide = Math.min(b.w, b.h);
     const aspect = longSide / Math.max(1, shortSide);
     const fillRatio = b.area / (b.w * b.h);
-    const isBorder = aspect >= 5 && longSide >= 150 && fillRatio >= 0.5;
+    const minSolidThickness = Math.max(8, Math.round(Math.min(width, height) * 0.004));
+    // 长宽比只说明“像线”，不能说明“是实心边条”。厚度门槛专门排除谱系细线。
+    const isBorder = aspect >= 5 && longSide >= 150 && shortSide >= minSolidThickness && fillRatio >= 0.55;
     const isTag = !isBorder && b.w >= 30 && b.h >= 30 && fillRatio >= 0.55 && b.area >= 1200;
     if (!isBorder && !isTag) continue;
     const entry = { id: uuid(), x: b.x, y: b.y, w: b.w, h: b.h };
-    if (isBorder) borderRects.push(entry);
+    if (isBorder) appendRectIfDistinct(borderRects, entry);
     else tagRects.push(entry);
     // 掩码标记
     for (let i = 0; i < labels.length; i++) {
@@ -143,9 +224,11 @@ export function detectTreeLines(bin: Uint8Array, width: number, height: number, 
   for (let i = 0; i < cleaned.length; i++) {
     cleaned[i] = bin[i] && !rectMask[i] ? 1 : 0;
   }
-  const openH = openingByRunLength(cleaned, width, height, 'h', MIN_LINE_LEN);
-  const openV = openingByRunLength(cleaned, width, height, 'v', KERNEL_LINE_V_LEN);
-  const hLines = componentsToLines(openH, width, height, 'h');
-  const vLines = componentsToLines(openV, width, height, 'v');
+  const horizontalMin = Math.max(MIN_LINE_LEN, Math.round(width * 0.08));
+  const verticalMin = Math.max(KERNEL_LINE_V_LEN, Math.round(height * 0.022));
+  const openH = openingByRunLength(cleaned, width, height, 'h', horizontalMin);
+  const openV = openingByRunLength(cleaned, width, height, 'v', verticalMin);
+  const hLines = componentsToLines(openH, width, height, 'h').filter((line) => line.widthPx <= Math.max(10, height * 0.004));
+  const vLines = componentsToLines(openV, width, height, 'v').filter((line) => line.widthPx <= Math.max(10, width * 0.006));
   return [...hLines, ...vLines];
 }

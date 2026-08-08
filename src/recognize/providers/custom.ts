@@ -14,6 +14,7 @@ import type {
 } from '../types';
 import { buildGridUserPrompt, extractJson, PAGE_USER_PROMPT, SYSTEM_PROMPT } from '../prompt';
 import { TOKENS_PER_CHAR } from '@/lib/constants';
+import { routeThroughProxy } from './endpoint';
 
 /** 预置端点模板（设置界面下拉） */
 export const ENDPOINT_PRESETS: Array<{ label: string; endpoint: string; model: string }> = [
@@ -28,7 +29,7 @@ export const ENDPOINT_PRESETS: Array<{ label: string; endpoint: string; model: s
 ];
 
 interface ChatCompletionResponse {
-  choices?: Array<{ message?: { content?: string } }>;
+  choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> } }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number };
   error?: { message?: string };
 }
@@ -40,7 +41,7 @@ async function callCompatible(
   signal: AbortSignal,
   charCount: number,
 ): Promise<{ json: unknown; usage?: { promptTokens: number; completionTokens: number } }> {
-  let base = (cfg.proxyUrl || cfg.endpoint || '').replace(/\/$/, '');
+  let base = (cfg.endpoint || '').replace(/\/$/, '');
   if (!base) throw new Error('自定义端点未配置 endpoint');
   // 兼容用户输入 "https://host/v1" 或 "https://host/compatible-mode/v1"：去掉末尾 /v1 再统一拼接
   base = base.replace(/\/v1$/, '');
@@ -67,7 +68,7 @@ async function callCompatible(
   const url = `${base}/v1/chat/completions`;
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetch(routeThroughProxy(cfg.proxyUrl, url), {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
@@ -92,7 +93,8 @@ async function callCompatible(
   }
   const data = (await res.json()) as ChatCompletionResponse;
   if (data.error?.message) throw new Error(`端点错误：${data.error.message}`);
-  const content = data.choices?.[0]?.message?.content;
+  const rawContent = data.choices?.[0]?.message?.content;
+  const content = Array.isArray(rawContent) ? rawContent.map((part) => part.text ?? '').join('') : rawContent;
   if (!content) throw new Error('端点返回为空');
   return {
     json: extractJson(content),
@@ -112,6 +114,8 @@ function parseItems(json: unknown): RecognizedItem[] {
       char: it.char === null || it.char === undefined ? null : String(it.char),
       confidence: Math.max(0, Math.min(1, Number(it.confidence) || 0)),
       note: it.note as RecognizedItem['note'],
+      simplified: typeof it.simplified === 'string' ? it.simplified : undefined,
+      candidates: Array.isArray(it.candidates) ? it.candidates.map(String).slice(0, 3) : undefined,
     };
   });
 }
@@ -130,7 +134,7 @@ export const customProvider: LLMProvider = {
     const { json, usage } = await callCompatible(
       cfg,
       req.batch.imageBase64Png,
-      buildGridUserPrompt(cols, rows, req.batch.ids.length),
+      req.promptOverride ?? buildGridUserPrompt(cols, rows, req.batch.ids.length),
       req.signal,
       req.batch.ids.length,
     );
@@ -139,7 +143,7 @@ export const customProvider: LLMProvider = {
 
   async recognizePageImage(req: RecognizeBatchRequest, cfg: ProviderConfig): Promise<RecognizePageResult> {
     if (!req.pageImageBase64) throw new Error('C 模式请求缺少整页图');
-    const { json, usage } = await callCompatible(cfg, req.pageImageBase64, PAGE_USER_PROMPT, req.signal, 500);
+    const { json, usage } = await callCompatible(cfg, req.pageImageBase64, req.promptOverride ?? PAGE_USER_PROMPT, req.signal, 500);
     const rawItems = (json as { items: Array<Record<string, unknown>> }).items;
     const items: RecognizedPageItem[] = parseItems(json).map((it, i) => ({
       ...it,

@@ -74,7 +74,7 @@ export const NODE_R_MAX = 28;
 
 /* ---------- 存储键名 ---------- */
 export const DB_NAME = 'zupuscript-web';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 export const STORE_PROJECTS = 'projects';
 export const STORE_PAGES = 'pages';
 export const STORE_UNDO = 'undoStacks';
@@ -82,6 +82,7 @@ export const STORE_AUDIT = 'auditLogs';
 export const STORE_CACHE = 'recognizeCache';
 export const STORE_BLOBS = 'blobs';
 export const STORE_KEYSTORE = 'keystore';
+export const STORE_RECOGNITION_MEMORY = 'recognitionMemory';
 /** OPFS 图像目录名 */
 export const OPFS_IMAGE_DIR = 'images';
 

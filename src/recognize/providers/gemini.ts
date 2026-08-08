@@ -18,6 +18,7 @@ import {
   SYSTEM_PROMPT,
 } from '../prompt';
 import { TOKENS_PER_CHAR } from '@/lib/constants';
+import { routeThroughProxy } from './endpoint';
 import type { RecognizedItem, RecognizedPageItem } from '../types';
 
 const DEFAULT_ENDPOINT = 'https://generativelanguage.googleapis.com';
@@ -29,7 +30,7 @@ interface GeminiResponse {
 }
 
 function endpointFor(cfg: ProviderConfig, model: string): string {
-  const base = (cfg.proxyUrl || cfg.endpoint || DEFAULT_ENDPOINT).replace(/\/$/, '');
+  const base = (cfg.endpoint || DEFAULT_ENDPOINT).replace(/\/$/, '');
   return `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 }
 
@@ -42,7 +43,7 @@ async function callGemini(
   charCount: number,
 ): Promise<{ json: unknown; usage?: { promptTokens: number; completionTokens: number } }> {
   if (!cfg.apiKey) throw new Error('未配置 Gemini API Key');
-  const url = `${endpointFor(cfg, cfg.model)}?key=${encodeURIComponent(cfg.apiKey)}`;
+  const url = routeThroughProxy(cfg.proxyUrl, `${endpointFor(cfg, cfg.model)}?key=${encodeURIComponent(cfg.apiKey)}`);
   // max_tokens 动态：字数 × TOKENS_PER_CHAR，防 JSON 截断导致整批失败
   const maxTokens = Math.max(2048, charCount * TOKENS_PER_CHAR);
   const body = {
@@ -95,6 +96,8 @@ function parseItems(json: unknown): RecognizedItem[] {
       char: it.char === null || it.char === undefined ? null : String(it.char),
       confidence: Math.max(0, Math.min(1, Number(it.confidence) || 0)),
       note: it.note as RecognizedItem['note'],
+      simplified: typeof it.simplified === 'string' ? it.simplified : undefined,
+      candidates: Array.isArray(it.candidates) ? it.candidates.map(String).slice(0, 3) : undefined,
     };
   });
 }
@@ -113,7 +116,7 @@ export const geminiProvider: LLMProvider = {
     const { json, usage } = await callGemini(
       cfg,
       req.batch.imageBase64Png,
-      buildGridUserPrompt(cols, rows, req.batch.ids.length),
+      req.promptOverride ?? buildGridUserPrompt(cols, rows, req.batch.ids.length),
       GRID_RESPONSE_SCHEMA,
       req.signal,
       req.batch.ids.length,
@@ -123,7 +126,7 @@ export const geminiProvider: LLMProvider = {
 
   async recognizePageImage(req: RecognizeBatchRequest, cfg: ProviderConfig): Promise<RecognizePageResult> {
     if (!req.pageImageBase64) throw new Error('C 模式请求缺少整页图');
-    const { json, usage } = await callGemini(cfg, req.pageImageBase64, PAGE_USER_PROMPT, PAGE_RESPONSE_SCHEMA, req.signal, 500);
+    const { json, usage } = await callGemini(cfg, req.pageImageBase64, req.promptOverride ?? PAGE_USER_PROMPT, PAGE_RESPONSE_SCHEMA, req.signal, 500);
     const items = parseItems(json).map((it, i) => {
       const raw = (json as { items: Array<Record<string, unknown>> }).items[i];
       const pageItem: RecognizedPageItem = {

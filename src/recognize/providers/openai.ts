@@ -20,6 +20,7 @@ import {
   SYSTEM_PROMPT,
 } from '../prompt';
 import { TOKENS_PER_CHAR } from '@/lib/constants';
+import { routeThroughProxy } from './endpoint';
 
 const DEFAULT_ENDPOINT = 'https://api.openai.com';
 
@@ -39,7 +40,7 @@ async function callOpenAI(
   charCount: number,
 ): Promise<{ json: unknown; usage?: { promptTokens: number; completionTokens: number } }> {
   if (!cfg.apiKey) throw new Error('未配置 OpenAI API Key');
-  const base = (cfg.proxyUrl || cfg.endpoint || DEFAULT_ENDPOINT).replace(/\/$/, '');
+  const base = (cfg.endpoint || DEFAULT_ENDPOINT).replace(/\/$/, '');
   const maxTokens = Math.max(2048, charCount * TOKENS_PER_CHAR);
   const body = {
     model: cfg.model,
@@ -60,7 +61,7 @@ async function callOpenAI(
       json_schema: { name: schemaName, strict: true, schema },
     },
   };
-  const res = await fetch(`${base}/v1/chat/completions`, {
+  const res = await fetch(routeThroughProxy(cfg.proxyUrl, `${base}/v1/chat/completions`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
     body: JSON.stringify(body),
@@ -92,6 +93,8 @@ function parseItems(json: unknown): RecognizedItem[] {
       char: it.char === null || it.char === undefined ? null : String(it.char),
       confidence: Math.max(0, Math.min(1, Number(it.confidence) || 0)),
       note: it.note as RecognizedItem['note'],
+      simplified: typeof it.simplified === 'string' ? it.simplified : undefined,
+      candidates: Array.isArray(it.candidates) ? it.candidates.map(String).slice(0, 3) : undefined,
     };
   });
 }
@@ -110,7 +113,7 @@ export const openaiProvider: LLMProvider = {
     const { json, usage } = await callOpenAI(
       cfg,
       req.batch.imageBase64Png,
-      buildGridUserPrompt(cols, rows, req.batch.ids.length),
+      req.promptOverride ?? buildGridUserPrompt(cols, rows, req.batch.ids.length),
       'grid_recognition',
       GRID_RESPONSE_SCHEMA,
       req.signal,
@@ -121,7 +124,7 @@ export const openaiProvider: LLMProvider = {
 
   async recognizePageImage(req: RecognizeBatchRequest, cfg: ProviderConfig): Promise<RecognizePageResult> {
     if (!req.pageImageBase64) throw new Error('C 模式请求缺少整页图');
-    const { json, usage } = await callOpenAI(cfg, req.pageImageBase64, PAGE_USER_PROMPT, 'page_recognition', PAGE_RESPONSE_SCHEMA, req.signal, 500);
+    const { json, usage } = await callOpenAI(cfg, req.pageImageBase64, req.promptOverride ?? PAGE_USER_PROMPT, 'page_recognition', PAGE_RESPONSE_SCHEMA, req.signal, 500);
     const rawItems = (json as { items: Array<Record<string, unknown>> }).items;
     const items: RecognizedPageItem[] = parseItems(json).map((it, i) => ({
       ...it,

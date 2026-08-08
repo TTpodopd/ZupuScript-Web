@@ -41,7 +41,13 @@ export interface PipelineAPI {
     height: number,
     onProgress: (p: ProgressInfo) => void,
   ): Promise<LayoutResult>;
-  segment(binary: Uint8Array, width: number, height: number, lines: TreeLine[]): Promise<CharItem[]>;
+  segment(
+    binary: Uint8Array,
+    width: number,
+    height: number,
+    lines: TreeLine[],
+    excludedRects?: Array<Pick<BorderRect | TagRect, 'x' | 'y' | 'w' | 'h'>>,
+  ): Promise<CharItem[]>;
 }
 
 const api: PipelineAPI = {
@@ -57,7 +63,7 @@ const api: PipelineAPI = {
     onProgress({ stage: 'layout', percent: 35 });
     const treeLines = detectTreeLines(binary, width, height, rectMask);
     onProgress({ stage: 'layout', percent: 55 });
-    const treeNodes = detectNodes(binary, width, height);
+    const treeNodes = detectNodes(binary, width, height, treeLines);
     onProgress({ stage: 'layout', percent: 80 });
     const artifacts = detectArtifacts(binary, width, height, treeLines);
     // 装饰块内部反色分析（存在性统计，供 UI 提示）
@@ -68,8 +74,8 @@ const api: PipelineAPI = {
     return { borderRects, tagRects, treeLines, treeNodes, artifacts };
   },
 
-  async segment(binary, width, height, lines) {
-    return segmentChars(binary, width, height, lines);
+  async segment(binary, width, height, lines, excludedRects = []) {
+    return segmentChars(binary, width, height, lines, excludedRects);
   },
 };
 

@@ -1,11 +1,12 @@
 /**
  * 脚本生成与导出（F7.x，全本地）：
  * - generate(): Page[] → 七段结构脚本 → lint 自检，失败不输出；
- * - 导出：浏览器下载（.py + 同名 .txt 副本）/ JSZip 打包 / FSAccess 直写目录。
+ * - 导出：默认只输出 Scribus 实际执行所需的 .py 脚本。
  */
 import JSZip from 'jszip';
 import { DEFAULT_PX_PER_MM, PT_PER_MM } from '@/lib/constants';
 import type { Page, Project } from '@/model/types';
+import { exportProject } from '@/model/zpproj';
 import { downloadText } from '@/lib/utils';
 import { hasFSAccess, pickDirectory, writeTextFile } from '@/storage/fsaccess';
 import { countEmitted, emitAllPagesData, emitPageData } from './emit';
@@ -93,21 +94,43 @@ export function generateMergedScript(
 export interface ExportBundle {
   scripts: GeneratedScript[];
   helpers: Array<{ filename: string; code: string }>;
+  /** 网页校对后的完整场景数据，供回溯、二次编辑和外部工具读取。 */
+  sceneJson: { filename: string; code: string };
+  /** 给 Scribus 操作员的最短执行说明。 */
+  readme: { filename: string; code: string };
   reportHtml?: { filename: string; code: string };
 }
 
-/** 浏览器逐个下载（.py + 同名 .txt 副本，F7.2） */
+function buildReadme(project: Project, pages: Page[], mode: 'perPage' | 'merged'): string {
+  const scriptHint = mode === 'merged' ? `${project.name}_合并_scribus.py` : 'scripts/ 目录内任一页面脚本';
+  return `# ${project.name} · Scribus 最终排版包
+
+本工作包采用“双引擎”流程：网页负责识别、编辑和校对，Scribus 负责最终字体排版与印刷级输出。
+
+## 在 Scribus 1.6.6 中执行
+
+1. 打开 Scribus，新建自定义页面。页面尺寸以脚本顶部的 PAGE_WIDTH_MM / PAGE_HEIGHT_MM 为准，单位使用毫米。
+2. 打开“脚本 → 执行脚本…”，执行 ${scriptHint}。
+3. 首次执行若提示字体缺失，先执行 helpers/字体清单脚本.py，再把实际中文字体全名填入脚本的 FORCE_FONT。
+4. 执行完成后在 Scribus 中检查字体、出血和页面尺寸，再导出 PDF/PNG。
+
+## 数据约定
+
+- 所有坐标以原图像素为基准；脚本内部按 PX_PER_MM 换算为毫米。
+- 文本框、字号、居中、节点白色遮挡和黑标折角已按 v7 规则生成。
+- scene.json 保存网页端校对后的可编辑数据，可用于回溯和二次导入。
+- 本包不包含 API Key；原图是否携带由用户自行控制。
+
+页面数：${pages.length}
+生成时间：${new Date().toLocaleString('zh-CN')}
+`;
+}
+
+/** 浏览器逐个下载关键脚本；场景、说明和辅助文件不再混入默认导出。 */
 export function downloadBundle(bundle: ExportBundle): void {
   for (const s of bundle.scripts) {
     if (!s.ok) continue;
     downloadText(s.filename, s.code, 'text/x-python');
-    downloadText(s.filename.replace(/\.py$/, '.txt'), s.code);
-  }
-  for (const h of bundle.helpers) {
-    downloadText(h.filename, h.code, 'text/x-python');
-  }
-  if (bundle.reportHtml) {
-    downloadText(bundle.reportHtml.filename, bundle.reportHtml.code, 'text/html');
   }
 }
 
@@ -118,14 +141,6 @@ export async function downloadZip(bundle: ExportBundle, zipName: string): Promis
   for (const s of bundle.scripts) {
     if (!s.ok) continue;
     scriptDir?.file(s.filename, s.code);
-    scriptDir?.file(s.filename.replace(/\.py$/, '.txt'), s.code);
-  }
-  const helperDir = zip.folder('helpers');
-  for (const h of bundle.helpers) {
-    helperDir?.file(h.filename, h.code);
-  }
-  if (bundle.reportHtml) {
-    zip.file(bundle.reportHtml.filename, bundle.reportHtml.code);
   }
   const blob = await zip.generateAsync({ type: 'blob' });
   const url = URL.createObjectURL(blob);
@@ -147,14 +162,6 @@ export async function writeBundleToDirectory(bundle: ExportBundle): Promise<bool
   for (const s of bundle.scripts) {
     if (!s.ok) continue;
     await writeTextFile(scriptsDir, s.filename, s.code);
-    await writeTextFile(scriptsDir, s.filename.replace(/\.py$/, '.txt'), s.code);
-  }
-  const helpersDir = await dir.getDirectoryHandle('helpers', { create: true });
-  for (const h of bundle.helpers) {
-    await writeTextFile(helpersDir, h.filename, h.code);
-  }
-  if (bundle.reportHtml) {
-    await writeTextFile(dir, bundle.reportHtml.filename, bundle.reportHtml.code);
   }
   return true;
 }
@@ -173,7 +180,14 @@ export function buildBundle(
       ? [generateMergedScript(project, sorted, overrides)]
       : sorted.map((p) => generatePageScript(p, overrides));
   const helpers = getHelperScripts(sorted[0]?.calibration.pageMm).map((h) => ({ filename: h.filename, code: h.code }));
-  return { scripts, helpers, reportHtml };
+  const safeName = sanitizeFilename(project.name);
+  return {
+    scripts,
+    helpers,
+    sceneJson: { filename: 'scene.json', code: exportProject(project, sorted) },
+    readme: { filename: `${safeName}_Scribus使用说明.md`, code: buildReadme(project, sorted, mode) },
+    reportHtml,
+  };
 }
 
 /** 线宽换算展示用（F5.3 公式在界面可查看） */
