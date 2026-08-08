@@ -152,6 +152,42 @@ function appendRectIfDistinct(
   rects.push(rect);
 }
 
+/** 扫描页边区域的墨迹，补回 PDF 矢量细页框（约 1pt） */
+function detectPageOutlineFrame(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+): BorderRect | null {
+  const strip = Math.max(24, Math.round(Math.min(width, height) * 0.045));
+  let minX = width;
+  let minY = height;
+  let maxX = 0;
+  let maxY = 0;
+  let found = false;
+
+  const scan = (y0: number, y1: number, x0: number, x1: number) => {
+    for (let y = y0; y < y1; y += 1) {
+      for (let x = x0; x < x1; x += 1) {
+        if (!bin[y * width + x]) continue;
+        found = true;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+  };
+
+  scan(0, strip, 0, width);
+  scan(height - strip, height, 0, width);
+  scan(0, height, 0, strip);
+  scan(0, height, width - strip, width);
+
+  if (!found) return null;
+  if (maxX - minX < width * 0.35 || maxY - minY < height * 0.35) return null;
+  return { id: uuid(), x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+}
+
 /**
  * 检测外框实心黑条与装饰块（F3.1/F3.5 第一步）。
  * 粗核开运算（横 80 / 纵 80）取交集区域 → 连通域 → 按长宽比与填充率分类。
@@ -170,10 +206,29 @@ export function detectRects(bin: Uint8Array, width: number, height: number): Rec
   const tagRects: TagRect[] = [];
   const rectMask = new Uint8Array(bin.length);
 
+  const outline = detectPageOutlineFrame(bin, width, height);
+  if (outline) {
+    appendRectIfDistinct(borderRects, outline);
+    markRectMask(rectMask, width, height, outline);
+  }
+
   // 页面外框通常占据整行/整列的大部分墨迹，投影检测比粗块连通域更稳健，
   // 也能避免把边框拆成大量“谱系线”。
+  const edgeMargin = (axis: 'h' | 'v') =>
+    axis === 'h' ? Math.max(12, Math.round(height * 0.03)) : Math.max(12, Math.round(width * 0.03));
+  const isEdgeBand = (axis: 'h' | 'v', band: { start: number; end: number }) => {
+    const margin = edgeMargin(axis);
+    const span = axis === 'h' ? height : width;
+    return band.start < margin || band.end > span - margin;
+  };
+  const minBandThickness = (atEdge: boolean) =>
+    atEdge
+      ? Math.max(2, Math.round(Math.min(width, height) * 0.0008))
+      : Math.max(8, Math.round(Math.min(width, height) * 0.004));
+
   const addProjectionBorder = (axis: 'h' | 'v', band: { start: number; end: number }) => {
-    const minThickness = Math.max(8, Math.round(Math.min(width, height) * 0.004));
+    const atEdge = isEdgeBand(axis, band);
+    const minThickness = minBandThickness(atEdge);
     if (band.end - band.start < minThickness) return;
     let minX = width;
     let minY = height;

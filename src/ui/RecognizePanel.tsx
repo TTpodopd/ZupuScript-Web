@@ -19,12 +19,13 @@ import {
 import { CONFIDENCE_THRESHOLD, GRID_BATCH_SIZE } from '@/lib/constants';
 import type { Page, PrivacyMode } from '@/model/types';
 import { grantConsent, hasConsented, isForcedLocal } from '@/privacy/consent';
-import { loadApiKey, saveApiKey } from '@/privacy/keystore';
+import { buildProviderConfig } from '@/recognize/buildConfig';
+import { saveApiKey } from '@/privacy/keystore';
 import { getBinaryImage } from '@/storage/opfs';
 import { useProjectStore } from '@/store/projectStore';
 import { useSettingsStore } from '@/store/settingsStore';
 import { getProvider, providerDomain, recognizePage } from '@/recognize/orchestrator';
-import type { ProviderConfig, RecognizeProgress } from '@/recognize/types';
+import type { RecognizeProgress } from '@/recognize/types';
 import { buildGridBatch } from '@/segment/grid';
 
 export default function RecognizePanel({ page }: { page: Page }) {
@@ -34,7 +35,7 @@ export default function RecognizePanel({ page }: { page: Page }) {
 
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [passphrase, setPassphrase] = useState('');
-  const [sessionOnly, setSessionOnly] = useState(true);
+  const [sessionOnly, setSessionOnly] = useState(false);
   const [consentOpen, setConsentOpen] = useState(false);
   const [consentChecked, setConsentChecked] = useState(false); // P1.1：默认不勾选
   const [progress, setProgress] = useState<RecognizeProgress | null>(null);
@@ -52,22 +53,7 @@ export default function RecognizePanel({ page }: { page: Page }) {
   /** 成本预估（F4.9：调用前预估） */
   const estimate = provider && mode !== 'A' ? provider.estimateCost(page.chars.length) * (mode === 'C' ? 6 : 2) : 0;
 
-  const buildConfig = async (): Promise<ProviderConfig> => {
-    const storedKey = (await loadApiKey(connection?.id ?? providerId, passphrase || undefined))
-      ?? (await loadApiKey(providerId, passphrase || undefined))
-      ?? apiKeyInput
-      ?? undefined;
-    return {
-      provider: providerId,
-      apiKey: storedKey || undefined,
-      endpoint: connection?.endpoint || settings.provider.endpoint || undefined,
-      proxyUrl: connection?.proxyUrl || settings.provider.proxyUrl || undefined,
-      model: model?.id || settings.activeModelId || settings.provider.model || provider?.defaultModel || '',
-      concurrency: settings.concurrency,
-      timeoutMs: settings.timeoutMs,
-      maxRetries: settings.maxRetries,
-    };
-  };
+  const buildConfig = () => buildProviderConfig(passphrase || undefined, apiKeyInput);
 
   const doRecognize = async () => {
     setBusy(true);
@@ -76,14 +62,14 @@ export default function RecognizePanel({ page }: { page: Page }) {
     try {
       const stored = await getBinaryImage(page.binaryKey);
       if (!stored) throw new Error('找不到预处理结果，请先运行预处理');
-      const cfg = await buildConfig();
+      const { cfg, mode: recognizeMode } = await buildConfig();
       const { chars, outcome } = await recognizePage(
         page,
         stored.bin,
         stored.width,
         stored.height,
         cfg,
-        mode,
+        recognizeMode,
         settings.pageBudgetCny,
         setProgress,
       );
@@ -91,8 +77,8 @@ export default function RecognizePanel({ page }: { page: Page }) {
         chars,
         status: 'recognized',
         recognition: {
-          mode,
-          provider: providerId,
+          mode: recognizeMode,
+          provider: cfg.provider,
           model: cfg.model,
           batches: outcome.batches,
           costEstimateCny: outcome.costCny,
@@ -129,7 +115,8 @@ export default function RecognizePanel({ page }: { page: Page }) {
     if (!apiKeyInput.trim()) return;
     try {
       await saveApiKey(connection?.id ?? providerId, apiKeyInput.trim(), passphrase || undefined, sessionOnly);
-      setMessage(sessionOnly ? '密钥已保存（仅本次会话，不落盘）' : '密钥已用口令 AES-GCM 加密保存到本地');
+      if (!sessionOnly && mode !== 'A') grantConsent(mode);
+      setMessage(sessionOnly ? '密钥已保存（仅本次会话）' : '密钥已加密保存到本机，刷新后自动加载');
       setApiKeyInput('');
     } catch (err) {
       setMessage(err instanceof Error ? err.message : '密钥保存失败');
@@ -177,10 +164,13 @@ export default function RecognizePanel({ page }: { page: Page }) {
                 <Input type="password" value={apiKeyInput} onChange={(e) => setApiKeyInput(e.target.value)} placeholder="粘贴 API Key" autoComplete="off" />
                 <label className="flex items-center gap-2 text-xs">
                   <input type="checkbox" checked={sessionOnly} onChange={(e) => setSessionOnly(e.target.checked)} />
-                  仅本次会话（不落盘，推荐）
+                  仅本次会话（不勾选则加密保存到本机）
                 </label>
+                {sessionOnly && (
+                  <p className="text-xs text-muted-foreground">关闭浏览器后需重新输入 Key。</p>
+                )}
                 {!sessionOnly && (
-                  <Input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder="加密口令（用于 AES-GCM 加密保存）" autoComplete="new-password" />
+                  <Input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder="可选：自定义加密口令（留空则用本机设备密钥）" autoComplete="new-password" />
                 )}
                 <Button size="sm" variant="outline" onClick={() => void handleSaveKey()}>
                   保存密钥

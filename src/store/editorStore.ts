@@ -5,6 +5,7 @@
  */
 import { create } from 'zustand';
 import { UNDO_LIMIT } from '@/lib/constants';
+import { computeCenterOnPoint } from '@/ui/canvasOverlay';
 import type { BorderRect, CharItem, Page, TagRect, TreeLine, TreeNode } from '@/model/types';
 import { loadUndoStack, saveUndoStack } from '@/storage/db';
 import { learnManualCorrection } from '@/recognize/memory';
@@ -42,10 +43,16 @@ interface EditorState {
   selectedNodeId: string | null;
   selectedRectId: string | null;
   transform: ViewTransform;
+  /** 校对操作区视口尺寸，用于低置信跳转居中 */
+  canvasViewSize: { w: number; h: number };
   overlayMode: OverlayMode;
   overlayOpacity: number;
   /** 低置信面板当前索引（Tab 逐条跳转） */
   lowConfCursor: number;
+  /** 低置信列表悬停预览（未选中时操作区跟随） */
+  lowConfHoverId: string | null;
+  /** 框选矩形（图像坐标），供原图区同步高亮 */
+  rubberBand: { x0: number; y0: number; x1: number; y1: number } | null;
   undoStack: EditCommand[];
   redoStack: EditCommand[];
   /** 当前撤销栈对应的页面 */
@@ -56,9 +63,14 @@ interface EditorState {
   setSelectedNode: (id: string | null) => void;
   setSelectedRect: (id: string | null) => void;
   setTransform: (t: Partial<ViewTransform>) => void;
+  setCanvasViewSize: (size: { w: number; h: number }) => void;
+  /** 将字符居中到校对操作区视口 */
+  centerOnChar: (cx: number, cy: number, minScale?: number) => void;
   setOverlayMode: (m: OverlayMode) => void;
   setOverlayOpacity: (v: number) => void;
   setLowConfCursor: (i: number) => void;
+  setLowConfHoverId: (id: string | null) => void;
+  setRubberBand: (band: { x0: number; y0: number; x1: number; y1: number } | null) => void;
 
   loadStacks: (pageId: string) => Promise<void>;
   apply: (cmd: EditCommand) => void;
@@ -177,9 +189,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   selectedNodeId: null,
   selectedRectId: null,
   transform: { scale: 0.2, offsetX: 0, offsetY: 0 },
+  canvasViewSize: { w: 0, h: 0 },
   overlayMode: 'split',
   overlayOpacity: 0.5,
   lowConfCursor: 0,
+  lowConfHoverId: null,
+  rubberBand: null,
   undoStack: [],
   redoStack: [],
   stackPageId: null,
@@ -189,9 +204,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setSelectedNode: (id) => set({ selectedNodeId: id, selectedCharIds: id ? [] : get().selectedCharIds, selectedLineId: null, selectedRectId: null }),
   setSelectedRect: (id) => set({ selectedRectId: id, selectedCharIds: id ? [] : get().selectedCharIds, selectedLineId: null, selectedNodeId: null }),
   setTransform: (t) => set((s) => ({ transform: { ...s.transform, ...t } })),
+  setCanvasViewSize: (size) => set({ canvasViewSize: size }),
+  centerOnChar: (cx, cy, minScale = 0.35) => {
+    const { canvasViewSize, transform } = get();
+    const { w, h } = canvasViewSize;
+    if (w <= 0 || h <= 0) return;
+    const scale = Math.max(transform.scale, minScale);
+    set({ transform: computeCenterOnPoint(cx, cy, w, h, scale) });
+  },
   setOverlayMode: (m) => set({ overlayMode: m }),
   setOverlayOpacity: (v) => set({ overlayOpacity: v }),
   setLowConfCursor: (i) => set({ lowConfCursor: i }),
+  setLowConfHoverId: (id) => set({ lowConfHoverId: id }),
+  setRubberBand: (band) => set({ rubberBand: band }),
 
   loadStacks: async (pageId) => {
     if (get().stackPageId === pageId) return;
@@ -205,6 +230,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedNodeId: null,
       selectedRectId: null,
       lowConfCursor: 0,
+      lowConfHoverId: null,
+      rubberBand: null,
     });
   },
 

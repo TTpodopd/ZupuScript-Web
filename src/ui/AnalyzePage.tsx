@@ -12,6 +12,8 @@ import { Select } from '@/ui/components/ui/select';
 import { calibratePage } from '@/calibrate/calibrate';
 import { pageMmFromPx } from '@/calibrate/calibrate';
 import { binaryToImageData } from '@/imaging/raster';
+import { pagesPendingAnalysis, pendingAnalysisSignature } from '@/lib/utils';
+import { PDF_STROKE_DILATE_RADIUS } from '@/lib/constants';
 import type { Page } from '@/model/types';
 import { getBinaryImage, getPageImageData, putBinaryImage } from '@/storage/opfs';
 import { useProjectStore } from '@/store/projectStore';
@@ -19,7 +21,9 @@ import { useSettingsStore } from '@/store/settingsStore';
 import type { PipelineAPI, ProgressInfo } from '@/workers/pipeline.worker';
 import RecognizePanel from './RecognizePanel';
 import { recognizePage } from '@/recognize/orchestrator';
-import type { ProviderConfig, RecognizeProgress } from '@/recognize/types';
+import { buildProviderConfig } from '@/recognize/buildConfig';
+import type { RecognizeProgress } from '@/recognize/types';
+import { hasConsented } from '@/privacy/consent';
 
 type MaskKey = 'rects' | 'lines' | 'nodes' | 'tags' | 'artifacts';
 const MASK_COLORS: Record<MaskKey, string> = {
@@ -42,6 +46,55 @@ function createPipeline(): { worker: Worker; api: Comlink.Remote<PipelineAPI> } 
   return { worker, api: Comlink.wrap<PipelineAPI>(worker) };
 }
 
+/** 单页四阶段权重：预处理 25% · 版面 25% · 分割 20% · 识别 30% */
+const PAGE_PHASE = { preprocess: 0.25, layout: 0.25, segment: 0.2, recognition: 0.3 } as const;
+
+/** 将当前页内进度（0–1）换算为批处理总进度（0–100），保证换页时不回退。 */
+function computeBatchOverallPercent(
+  batch: { totalPages: number; currentPageIndex: number; phaseBase: number } | null,
+  progress: ProgressInfo | null,
+  recognitionProgress: RecognizeProgress | null,
+): number {
+  if (!batch || batch.totalPages <= 0) return 5;
+
+  const { totalPages, currentPageIndex, phaseBase } = batch;
+  let pageFraction = phaseBase;
+
+  if (recognitionProgress) {
+    const recRatio =
+      recognitionProgress.totalBatches > 0
+        ? recognitionProgress.doneBatches / recognitionProgress.totalBatches
+        : recognitionProgress.totalChars > 0
+          ? recognitionProgress.recognizedChars / recognitionProgress.totalChars
+          : 0;
+    pageFraction = phaseBase + PAGE_PHASE.recognition * Math.min(1, recRatio);
+  } else if (progress) {
+    const pct = progress.percent / 100;
+    switch (progress.stage) {
+      case 'deskew':
+      case 'binarize':
+      case 'denoise':
+        pageFraction = phaseBase + PAGE_PHASE.preprocess * pct;
+        break;
+      case 'layout':
+        pageFraction = phaseBase + PAGE_PHASE.preprocess + PAGE_PHASE.layout * pct;
+        break;
+      case 'segment':
+        pageFraction = phaseBase + PAGE_PHASE.preprocess + PAGE_PHASE.layout + PAGE_PHASE.segment * pct;
+        break;
+      default:
+        break;
+    }
+  }
+
+  pageFraction = Math.min(1, Math.max(phaseBase, pageFraction));
+  return Math.min(100, ((currentPageIndex + pageFraction) / totalPages) * 100);
+}
+
+function recognitionOnlyPhaseBase(): number {
+  return PAGE_PHASE.preprocess + PAGE_PHASE.layout + PAGE_PHASE.segment;
+}
+
 export default function AnalyzePage() {
   const { pages, currentProjectId, currentPageId, setCurrentPage, updatePage, setView } = useProjectStore();
   const { setBatchQueue, updateBatchTask } = useSettingsStore();
@@ -52,10 +105,11 @@ export default function AnalyzePage() {
   const [autoProcessing, setAutoProcessing] = useState(false);
   const [recognitionProgress, setRecognitionProgress] = useState<RecognizeProgress | null>(null);
   const [message, setMessage] = useState('');
+  const [batchProgress, setBatchProgress] = useState<{ totalPages: number; currentPageIndex: number; phaseBase: number } | null>(null);
   const [masks, setMasks] = useState<Record<MaskKey, boolean>>({ rects: true, lines: true, nodes: true, tags: true, artifacts: false });
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pipelineRef = useRef<ReturnType<typeof createPipeline> | null>(null);
-  const autoStartedRef = useRef<string | null>(null);
+  const batchStartedRef = useRef<string>('');
 
   const getPipeline = () => {
     if (!pipelineRef.current) pipelineRef.current = createPipeline();
@@ -71,13 +125,15 @@ export default function AnalyzePage() {
       return null;
     }
     const { api } = getPipeline();
+    const isPdfSource = target.source.dpi > 0;
     const result = await api.preprocess(
       image,
       {
-        targetDpi: target.source.dpi > 0 ? target.source.dpi : 254,
-        sourceDpi: target.source.dpi > 0 ? target.source.dpi : undefined,
+        targetDpi: isPdfSource ? target.source.dpi : 254,
+        sourceDpi: isPdfSource ? target.source.dpi : undefined,
         binarizer: 'sauvola',
         useOpenCV: true,
+        strokeDilate: isPdfSource ? PDF_STROKE_DILATE_RADIUS : 0,
       },
       Comlink.proxy((p: ProgressInfo) => setProgress(p)),
     );
@@ -143,14 +199,10 @@ export default function AnalyzePage() {
     const stored = await getBinaryImage(target.binaryKey);
     if (!stored) throw new Error('找不到预处理结果，无法开始识别');
     const settings = useSettingsStore.getState();
-    const mode = 'A' as const;
-    const cfg: ProviderConfig = {
-      provider: 'local',
-      model: 'local-tesseract',
-      concurrency: settings.concurrency,
-      timeoutMs: settings.timeoutMs,
-      maxRetries: settings.maxRetries,
-    };
+    const { cfg, mode } = await buildProviderConfig();
+    if (mode !== 'A' && !hasConsented(mode)) {
+      throw new Error(`请先在分析页「深度识别」区同意云端识别，或在设置中保存 API Key 后重试（当前模式 ${mode}）`);
+    }
     const result = await recognizePage(
       target,
       stored.bin,
@@ -166,7 +218,7 @@ export default function AnalyzePage() {
       status: 'recognized',
       recognition: {
         mode,
-        provider: 'local',
+        provider: cfg.provider,
         model: cfg.model,
         batches: result.outcome.batches,
         costEstimateCny: result.outcome.costCny,
@@ -179,6 +231,9 @@ export default function AnalyzePage() {
     if (!page || busy) return;
     setBusy(true);
     setMessage('');
+    setBatchProgress({ totalPages: 1, currentPageIndex: 0, phaseBase: 0 });
+    setProgress(null);
+    setRecognitionProgress(null);
     try {
       const bin = await runPreprocess(page);
       if (bin) {
@@ -194,6 +249,7 @@ export default function AnalyzePage() {
       setMessage(`处理失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setBusy(false);
+      setBatchProgress(null);
     }
   };
 
@@ -213,20 +269,30 @@ export default function AnalyzePage() {
   /** ③ 批处理（P1 极简）：连续多页顺序处理，失败页跳过并记录（F11.1/F11.2） */
   const handleBatch = async () => {
     if (busy) return;
-    const pendingPages = pages.filter((item) => item.status === 'imported' || item.status === 'preprocessed' || item.status === 'analyzed');
+    const pendingPages = pagesPendingAnalysis(pages);
     if (pendingPages.length === 0) return;
     setBusy(true);
     setAutoProcessing(true);
     setBatchQueue(pendingPages.map((p) => ({ pageId: p.id, status: 'pending' })));
+    setBatchProgress({ totalPages: pendingPages.length, currentPageIndex: 0, phaseBase: 0 });
     let ok = 0;
     let fail = 0;
-    for (const p of pendingPages) {
+    for (let pageIdx = 0; pageIdx < pendingPages.length; pageIdx++) {
+      const p = pendingPages[pageIdx];
       updateBatchTask(p.id, { status: 'running' });
       setCurrentPage(p.id);
-      setMessage(`正在处理第 ${ok + fail + 1}/${pendingPages.length} 页：${p.source.name}`);
+      setProgress(null);
+      setRecognitionProgress(null);
+      setMessage(`正在处理第 ${pageIdx + 1}/${pendingPages.length} 页：${p.source.name}`);
       try {
         let analyzed = useProjectStore.getState().pages.find((x) => x.id === p.id)!;
-        if (analyzed.status !== 'analyzed') {
+        const needsPipeline = analyzed.status !== 'analyzed';
+        setBatchProgress({
+          totalPages: pendingPages.length,
+          currentPageIndex: pageIdx,
+          phaseBase: needsPipeline ? 0 : recognitionOnlyPhaseBase(),
+        });
+        if (needsPipeline) {
           const bin = await runPreprocess(analyzed);
           if (!bin) throw new Error('无原图');
           analyzed = useProjectStore.getState().pages.find((x) => x.id === p.id)!;
@@ -234,7 +300,7 @@ export default function AnalyzePage() {
           analyzed = useProjectStore.getState().pages.find((x) => x.id === p.id)!;
         }
         if (analyzed.chars.length > 0) {
-          setMessage(`正在识别第 ${ok + fail + 1}/${pendingPages.length} 页：${p.source.name}`);
+          setMessage(`正在识别第 ${pageIdx + 1}/${pendingPages.length} 页：${p.source.name}`);
           await runRecognition(analyzed);
         }
         updateBatchTask(p.id, { status: 'done' });
@@ -244,17 +310,22 @@ export default function AnalyzePage() {
         fail++;
       }
     }
+    setBatchProgress({ totalPages: pendingPages.length, currentPageIndex: pendingPages.length, phaseBase: 0 });
     setMessage(`批处理完成：成功 ${ok} 页，失败 ${fail} 页${fail > 0 ? '（失败页可单独重试）' : ''}`);
     setBusy(false);
     setAutoProcessing(false);
+    setBatchProgress(null);
     if (fail === 0) setView('editor');
   };
 
   useEffect(() => {
-    if (!page || !pages.some((item) => item.status === 'imported') || autoStartedRef.current === currentProjectId) return;
-    autoStartedRef.current = currentProjectId;
+    const pending = pagesPendingAnalysis(pages);
+    if (!page || pending.length === 0) return;
+    const sig = pendingAnalysisSignature(pages);
+    if (batchStartedRef.current === sig) return;
+    batchStartedRef.current = sig;
     void handleBatch();
-  }, [currentProjectId, page?.id, page?.status, pages]);
+  }, [currentProjectId, pages]);
 
   /* ---------- 遮罩叠示（F3.7） ---------- */
   const overlayData = useMemo(() => page, [page]);
@@ -330,19 +401,19 @@ export default function AnalyzePage() {
     );
   }
 
-  if (autoProcessing || pages.some((item) => item.status === 'imported' || item.status === 'preprocessed' || item.status === 'analyzed')) {
-    const recognitionPercent = recognitionProgress && recognitionProgress.totalBatches > 0
-      ? (recognitionProgress.doneBatches / recognitionProgress.totalBatches) * 100
-      : 0;
-    const overallPercent = progress?.stage === 'layout'
-      ? 35 + progress.percent * 0.3
+  if (autoProcessing || pagesPendingAnalysis(pages).length > 0) {
+    const overallPercent = computeBatchOverallPercent(batchProgress, progress, recognitionProgress);
+    const activePhase = recognitionProgress
+      ? 4
       : progress?.stage === 'segment'
-        ? 65 + progress.percent * 0.2
-        : recognitionProgress
-          ? 85 + recognitionPercent * 0.15
+        ? 3
+        : progress?.stage === 'layout'
+          ? 2
           : progress
-            ? progress.percent * 0.35
-            : 5;
+            ? 1
+            : batchProgress && batchProgress.phaseBase >= recognitionOnlyPhaseBase()
+              ? 4
+              : 1;
     return (
       <div className="mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-3xl items-center justify-center px-4 py-10">
         <div className="w-full rounded-2xl border bg-card p-6 shadow-soft sm:p-8">
@@ -355,18 +426,18 @@ export default function AnalyzePage() {
               <p className="mt-1 text-sm text-muted-foreground">系统正在自动完成分析和识别，请不要关闭页面。</p>
             </div>
           </div>
-          <div className="mb-3 flex items-center justify-between text-sm">
-            <span>{message || '准备开始高精度本地处理…'}</span>
-            <span className="font-medium text-primary">{Math.round(Math.min(100, overallPercent))}%</span>
+          <div className="mb-3 flex items-center justify-between gap-3 text-sm">
+            <span className="min-w-0 truncate">{message || '准备开始本地处理…'}</span>
+            <span className="shrink-0 font-medium text-primary">{Math.round(overallPercent)}%</span>
           </div>
           <div className="h-3 overflow-hidden rounded-full bg-secondary">
-            <div className="h-full rounded-full bg-primary transition-all duration-500" style={{ width: `${Math.min(100, overallPercent)}%` }} />
+            <div className="h-full rounded-full bg-primary transition-all duration-500" style={{ width: `${overallPercent}%` }} />
           </div>
           <div className="mt-6 grid gap-2 text-xs text-muted-foreground sm:grid-cols-4">
-            <span className={progress ? 'text-foreground' : ''}>① 高清预处理</span>
-            <span className={progress?.stage === 'layout' ? 'text-foreground' : ''}>② 版面分析</span>
-            <span className={progress?.stage === 'segment' ? 'text-foreground' : ''}>③ 字符分割</span>
-            <span className={recognitionProgress ? 'text-foreground' : ''}>④ 深度识别与复核</span>
+            <span className={activePhase >= 1 ? 'text-foreground' : ''}>① 高清预处理</span>
+            <span className={activePhase >= 2 ? 'text-foreground' : ''}>② 版面分析</span>
+            <span className={activePhase >= 3 ? 'text-foreground' : ''}>③ 字符分割</span>
+            <span className={activePhase >= 4 ? 'text-foreground' : ''}>④ 深度识别与复核</span>
           </div>
           {recognitionProgress && (
             <p className="mt-4 rounded-lg bg-primary/5 p-3 text-xs leading-5 text-primary">

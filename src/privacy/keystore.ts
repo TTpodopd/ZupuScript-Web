@@ -19,6 +19,19 @@ export interface EncryptedKeyRecord {
 const sessionKeys = new Map<string, string>();
 
 const PBKDF2_ITERATIONS = 210_000;
+const DEVICE_KEY_STORAGE = 'zupu-device-key-v1';
+
+async function getDevicePassphrase(): Promise<string> {
+  if (typeof localStorage === 'undefined') {
+    return 'zupu-fallback-device-key';
+  }
+  let raw = localStorage.getItem(DEVICE_KEY_STORAGE);
+  if (!raw) {
+    raw = bufToB64(crypto.getRandomValues(new Uint8Array(32)));
+    localStorage.setItem(DEVICE_KEY_STORAGE, raw);
+  }
+  return raw;
+}
 
 function bufToB64(buf: ArrayBuffer | Uint8Array): string {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
@@ -49,7 +62,7 @@ async function deriveKey(passphrase: string, salt: Uint8Array): Promise<CryptoKe
 
 /**
  * 保存密钥。
- * @param sessionOnly true = 仅本次会话不落盘；false = 用口令 AES-GCM 加密后持久化。
+ * @param sessionOnly true = 仅本次会话不落盘；false = AES-GCM 加密后持久化（无口令时用本机设备密钥）
  */
 export async function saveApiKey(
   providerId: string,
@@ -62,10 +75,10 @@ export async function saveApiKey(
     await deleteKeyRecord(providerId).catch(() => undefined);
     return;
   }
-  if (!passphrase) throw new Error('持久化保存密钥需要设置口令');
+  const encryptPass = passphrase?.trim() || (await getDevicePassphrase());
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await deriveKey(passphrase, salt);
+  const key = await deriveKey(encryptPass, salt);
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv as BufferSource }, key, new TextEncoder().encode(plaintext));
   const record: EncryptedKeyRecord = {
     providerId,
@@ -75,28 +88,37 @@ export async function saveApiKey(
     updatedAt: Date.now(),
   };
   await putKeyRecord(record);
+  sessionKeys.set(providerId, plaintext);
 }
 
-/** 读取密钥：先查会话内存，再尝试用口令解密持久化记录 */
+/** 读取密钥：先查会话内存，再尝试解密持久化记录（用户口令或本机设备密钥） */
 export async function loadApiKey(providerId: string, passphrase?: string): Promise<string | null> {
   const session = sessionKeys.get(providerId);
   if (session) return session;
   const record = await getKeyRecord(providerId);
   if (!record) return null;
-  if (!passphrase) return null; // 需要口令才能解密
-  try {
-    const key = await deriveKey(passphrase, b64ToBuf(record.salt));
-    const pt = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: b64ToBuf(record.iv) as BufferSource },
-      key,
-      b64ToBuf(record.ciphertext) as BufferSource,
-    );
-    const text = new TextDecoder().decode(pt);
-    sessionKeys.set(providerId, text); // 本次会话内缓存明文，避免反复解密
-    return text;
-  } catch {
-    throw new Error('口令错误或密钥数据已损坏');
+
+  const passphrases = passphrase?.trim()
+    ? [passphrase.trim()]
+    : [await getDevicePassphrase()];
+
+  for (const pass of passphrases) {
+    try {
+      const key = await deriveKey(pass, b64ToBuf(record.salt));
+      const pt = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: b64ToBuf(record.iv) as BufferSource },
+        key,
+        b64ToBuf(record.ciphertext) as BufferSource,
+      );
+      const text = new TextDecoder().decode(pt);
+      sessionKeys.set(providerId, text);
+      return text;
+    } catch {
+      /* 尝试下一个口令 */
+    }
   }
+  if (passphrase?.trim()) throw new Error('口令错误或密钥数据已损坏');
+  return null;
 }
 
 /** 是否已保存（不含明文判断，仅判断记录存在） */

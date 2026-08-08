@@ -7,8 +7,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/ui/components/ui/tab
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/ui/components/ui/dialog';
 import { MAX_CONCURRENCY } from '@/lib/constants';
 import { clearAuditLogs, exportAuditText, getSessionUploads, listAuditLogs, type AuditEntry } from '@/privacy/audit';
-import { hasApiKey, saveApiKey } from '@/privacy/keystore';
-import { isForcedLocal, revokeConsent } from '@/privacy/consent';
+import { grantConsent, isForcedLocal, revokeConsent } from '@/privacy/consent';
+import { hasApiKey, loadApiKey, saveApiKey } from '@/privacy/keystore';
 import { clearAllStores } from '@/storage/db';
 import { clearAllImages } from '@/storage/opfs';
 import { useSettingsStore, type ModelConnection } from '@/store/settingsStore';
@@ -29,10 +29,10 @@ function connectionLabel(connection: ModelConnection): string {
 
 function ModelConnectionsPanel() {
   const settings = useSettingsStore();
-  const [keyInput, setKeyInput] = useState('');
+  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
   const [passphrase, setPassphrase] = useState('');
-  const [sessionOnly, setSessionOnly] = useState(true);
-  const [keySaved, setKeySaved] = useState(false);
+  const [sessionOnly, setSessionOnly] = useState(false);
+  const [keySaved, setKeySaved] = useState<Record<string, boolean>>({});
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testMessage, setTestMessage] = useState<Record<string, string>>({});
   const active = settings.activeConnection();
@@ -40,20 +40,31 @@ function ModelConnectionsPanel() {
   const official = settings.connections.filter((c) => c.kind === 'official');
   const compatible = settings.connections.filter((c) => c.kind === 'compatible');
 
-  useEffect(() => {
-    if (!active) return;
-    void Promise.all([hasApiKey(active.id), hasApiKey(active.provider)]).then(([byConnection, byProvider]) => setKeySaved(byConnection || byProvider));
-  }, [active?.id, active?.provider]);
+  const setKeyDraft = (connectionId: string, value: string) => {
+    setKeyDrafts((prev) => ({ ...prev, [connectionId]: value }));
+  };
 
-  const saveKey = async () => {
-    if (!active || !keyInput.trim()) return;
+  useEffect(() => {
+    for (const connection of settings.connections) {
+      void Promise.all([hasApiKey(connection.id), hasApiKey(connection.provider)]).then(([byConnection, byProvider]) => {
+        setKeySaved((prev) => ({ ...prev, [connection.id]: byConnection || byProvider }));
+      });
+    }
+  }, [settings.connections]);
+
+  const saveKey = async (connection: ModelConnection) => {
+    const keyInput = keyDrafts[connection.id]?.trim() ?? '';
+    if (!keyInput) return;
     try {
-      await saveApiKey(active.id, keyInput.trim(), passphrase || undefined, sessionOnly);
-      setKeyInput('');
-      setKeySaved(true);
-      setTestMessage((s) => ({ ...s, [active.id]: 'API Key 已保存到本机' }));
+      await saveApiKey(connection.id, keyInput, passphrase || undefined, sessionOnly);
+      setKeyDraft(connection.id, '');
+      setKeySaved((prev) => ({ ...prev, [connection.id]: true }));
+      settings.setActiveConnection(connection.id);
+      const mode = useSettingsStore.getState().privacyMode;
+      if (!sessionOnly && mode !== 'A') grantConsent(mode);
+      setTestMessage((s) => ({ ...s, [connection.id]: sessionOnly ? 'API Key 已保存（仅本次会话）' : 'API Key 已加密保存到本机' }));
     } catch (error) {
-      setTestMessage((s) => ({ ...s, [active.id]: error instanceof Error ? error.message : 'API Key 保存失败' }));
+      setTestMessage((s) => ({ ...s, [connection.id]: error instanceof Error ? error.message : 'API Key 保存失败' }));
     }
   };
 
@@ -66,13 +77,22 @@ function ModelConnectionsPanel() {
     setTestingId(connection.id);
     setTestMessage((s) => ({ ...s, [connection.id]: '' }));
     try {
+      const draft = keyDrafts[connection.id]?.trim() ?? '';
+      const savedKey =
+        draft ||
+        (await loadApiKey(connection.id)) ||
+        (await loadApiKey(connection.provider)) ||
+        '';
+      if (!savedKey) {
+        setTestMessage((s) => ({ ...s, [connection.id]: '请先保存 API Key' }));
+        return;
+      }
       const base = connection.endpoint.replace(/\/$/, '');
       const target = connection.kind === 'compatible'
         ? `${base.replace(/\/v1$/i, '')}/v1/models`
         : `${base}/v1beta/models`;
       const url = connection.proxyUrl ? (() => { const u = new URL(connection.proxyUrl); u.searchParams.set('target', target); return u.toString(); })() : target;
-      const headers: Record<string, string> = {};
-      if (active?.id === connection.id && keyInput.trim()) headers.Authorization = `Bearer ${keyInput.trim()}`;
+      const headers: Record<string, string> = { Authorization: `Bearer ${savedKey}` };
       const response = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       setTestMessage((s) => ({ ...s, [connection.id]: '连接成功，可用于识别' }));
@@ -85,6 +105,8 @@ function ModelConnectionsPanel() {
 
   const renderCard = (connection: ModelConnection) => {
     const isActive = connection.id === settings.activeConnectionId;
+    const keyDraft = keyDrafts[connection.id] ?? '';
+    const saved = keySaved[connection.id] ?? false;
     return (
       <div key={connection.id} className={`rounded-xl border bg-card/70 transition-colors ${isActive ? 'border-primary/50 shadow-soft' : 'border-border/70'}`}>
         <button type="button" className="flex w-full items-center gap-3 px-4 py-3 text-left" onClick={() => settings.toggleConnection(connection.id)}>
@@ -112,7 +134,7 @@ function ModelConnectionsPanel() {
               ) : (
                 <div className="md:col-span-2"><Label>API Base URL</Label><Input value={connection.endpoint} onChange={(e) => settings.updateConnection(connection.id, { endpoint: e.target.value })} placeholder="https://api.example.com/v1" /><p className="mt-1 text-xs text-muted-foreground">填写到 /v1，不要包含 /chat/completions。</p></div>
               )}
-              <div className={connection.kind === 'official' ? '' : 'md:col-span-2'}><Label>API Key</Label><Input type="password" value={isActive ? keyInput : ''} onChange={(e) => setKeyInput(e.target.value)} placeholder={keySaved && isActive ? '已保存，输入新 Key 可覆盖' : '粘贴 API Key'} /></div>
+              <div className={connection.kind === 'official' ? '' : 'md:col-span-2'}><Label>API Key</Label><Input type="password" value={keyDraft} onChange={(e) => setKeyDraft(connection.id, e.target.value)} placeholder={saved ? '已保存，输入新 Key 可覆盖' : '粘贴 API Key'} autoComplete="off" /></div>
               {connection.kind === 'compatible' && <div className="md:col-span-2"><Label>可选代理 URL</Label><Input value={connection.proxyUrl} onChange={(e) => settings.updateConnection(connection.id, { proxyUrl: e.target.value })} placeholder="https://你的-worker.workers.dev" /><p className="mt-1 text-xs text-muted-foreground">代理会自动携带真实 Base URL，解决浏览器 CORS。</p></div>}
             </div>
             <div>
@@ -121,7 +143,7 @@ function ModelConnectionsPanel() {
                 {connection.models.map((model) => <div key={model.id} className="grid grid-cols-[1fr_1fr_auto_auto] gap-2"><Input value={model.name} onChange={(e) => settings.updateModel(connection.id, model.id, { name: e.target.value })} placeholder="显示名称" /><Input value={model.id} onChange={(e) => settings.updateModel(connection.id, model.id, { id: e.target.value })} placeholder="Model ID" /><Button size="sm" variant={isActive && settings.activeModelId === model.id ? 'secondary' : 'outline'} onClick={() => { settings.setActiveConnection(connection.id); settings.setActiveModel(model.id); }}>{isActive && settings.activeModelId === model.id ? '当前' : '使用'}</Button><Button size="icon" variant="ghost" aria-label="删除模型" disabled={connection.models.length <= 1} onClick={() => settings.removeModel(connection.id, model.id)}><Trash2 className="h-4 w-4" /></Button></div>)}
               </div>
             </div>
-            <div className="flex flex-wrap items-center gap-2 border-t pt-3"><Button variant="outline" onClick={() => void saveKey()} disabled={!isActive || !keyInput.trim()}>保存 API Key</Button><label className="flex items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" checked={sessionOnly} onChange={(e) => setSessionOnly(e.target.checked)} />仅本次会话</label><Button variant="outline" onClick={() => void testConnection(connection)} disabled={testingId === connection.id}>{testingId === connection.id ? <Loader2 className="h-4 w-4 animate-spin" /> : null}测试连接</Button><span className="text-xs text-muted-foreground">{testMessage[connection.id] || (connection.endpoint ? `将使用 ${connection.endpoint}` : '尚未配置')}</span></div>
+            <div className="flex flex-wrap items-center gap-2 border-t pt-3"><Button variant="outline" onClick={() => void saveKey(connection)} disabled={!keyDraft.trim()}>保存 API Key</Button><label className="flex items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" checked={sessionOnly} onChange={(e) => setSessionOnly(e.target.checked)} />仅本次会话</label>{!sessionOnly && <Input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder="可选加密口令" className="h-8 w-44" autoComplete="new-password" />}<Button variant="outline" onClick={() => void testConnection(connection)} disabled={testingId === connection.id}>{testingId === connection.id ? <Loader2 className="h-4 w-4 animate-spin" /> : null}测试连接</Button><span className="text-xs text-muted-foreground">{testMessage[connection.id] || (saved ? '密钥已保存，可直接测试连接' : connection.endpoint ? `将使用 ${connection.endpoint}` : '尚未配置')}</span></div>
           </div>
         )}
       </div>

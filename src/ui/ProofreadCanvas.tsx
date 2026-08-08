@@ -4,7 +4,6 @@
  * 所有修改一律经 editorStore.apply(EditCommand)，保证撤销栈与 idb 同步。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CONFIDENCE_THRESHOLD, PT_PER_MM } from '@/lib/constants';
 import type { CharItem, Page } from '@/model/types';
 import { useEditorStore } from '@/store/editorStore';
 import { useProjectStore } from '@/store/projectStore';
@@ -12,6 +11,7 @@ import { PREVIEW_FONT_FAMILY, PREVIEW_FONT_SCALE, ptToPx } from '@/verify/previe
 import { uuid } from '@/lib/utils';
 import { Button } from '@/ui/components/ui/button';
 import { Input } from '@/ui/components/ui/input';
+import { drawSelectionOverlay, computeFitCenterTransform, type FitMode } from '@/ui/canvasOverlay';
 
 interface EditPopup {
   charId: string;
@@ -38,14 +38,23 @@ type DragState =
   | { kind: 'pan'; lastX: number; lastY: number }
   | null;
 
-export default function ProofreadCanvas({ page }: { page: Page }) {
+export default function ProofreadCanvas({
+  page,
+  focusCharId = null,
+  fitMode = 'width',
+}: {
+  page: Page;
+  focusCharId?: string | null;
+  fitMode?: FitMode;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const cacheRef = useRef<HTMLCanvasElement | null>(null);
   const cacheKeyRef = useRef<string>('');
   const dragRef = useRef<DragState>(null);
+  const lastFitRef = useRef({ pageId: '', w: 0, h: 0 });
   const [popup, setPopup] = useState<EditPopup | null>(null);
-  const [size, setSize] = useState({ w: 800, h: 600 });
+  const [size, setSize] = useState({ w: 0, h: 0 });
 
   const {
     selectedCharIds,
@@ -59,6 +68,9 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
     setSelectedNode,
     setSelectedRect,
     apply,
+    rubberBand,
+    setRubberBand,
+    setCanvasViewSize,
   } = useEditorStore();
 
   /* ---------- 容器尺寸监听 ---------- */
@@ -66,11 +78,33 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
     const el = containerRef.current;
     if (!el) return;
     const ro = new ResizeObserver(() => {
-      setSize({ w: el.clientWidth, h: el.clientHeight });
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      setSize({ w, h });
+      setCanvasViewSize({ w, h });
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [setCanvasViewSize]);
+
+  /* ---------- 切换页面或视口显著变化时居中适配 ---------- */
+  useEffect(() => {
+    if (size.w <= 0 || size.h <= 0) return;
+    const last = lastFitRef.current;
+    const pageChanged = last.pageId !== page.id;
+    const sizeChanged =
+      last.w <= 0 ||
+      Math.abs(size.w - last.w) / last.w > 0.06 ||
+      Math.abs(size.h - last.h) / last.h > 0.06;
+    if (!pageChanged && !sizeChanged) return;
+    lastFitRef.current = { pageId: page.id, w: size.w, h: size.h };
+    setTransform(
+      computeFitCenterTransform(page.source.widthPx, page.source.heightPx, size.w, size.h, {
+        mode: fitMode,
+        padding: 0.96,
+      }),
+    );
+  }, [page.id, page.source.widthPx, page.source.heightPx, size.w, size.h, fitMode, setTransform]);
 
   /* ---------- 离屏缓存：重建层（F6.8） ---------- */
   const rebuildCache = useCallback(() => {
@@ -147,66 +181,15 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
     ctx.setTransform(transform.scale, 0, 0, transform.scale, transform.offsetX, transform.offsetY);
     ctx.drawImage(cache, 0, 0);
 
-    // 低置信标红（F4.6）
-    ctx.lineWidth = 2 / transform.scale;
-    for (const c of page.chars) {
-      if (c.conf < CONFIDENCE_THRESHOLD) {
-        ctx.strokeStyle = 'rgba(220,38,38,0.9)';
-        ctx.strokeRect(c.bbox[0] - 2, c.bbox[1] - 2, c.bbox[2] - c.bbox[0] + 4, c.bbox[3] - c.bbox[1] + 4);
-      }
-    }
-    // 选中高亮
-    ctx.strokeStyle = 'rgba(37,99,235,1)';
-    for (const c of page.chars) {
-      if (selectedCharIds.includes(c.id)) {
-        ctx.strokeRect(c.bbox[0] - 3, c.bbox[1] - 3, c.bbox[2] - c.bbox[0] + 6, c.bbox[3] - c.bbox[1] + 6);
-      }
-    }
-    const selLine = page.treeLines.find((l) => l.id === selectedLineId);
-    if (selLine) {
-      ctx.strokeStyle = 'rgba(37,99,235,1)';
-      ctx.lineWidth = Math.max(2 / transform.scale, selLine.widthPx + 4);
-      ctx.beginPath();
-      ctx.moveTo(selLine.x1, selLine.y1);
-      ctx.lineTo(selLine.x2, selLine.y2);
-      ctx.stroke();
-      // 端点手柄
-      ctx.fillStyle = '#2563eb';
-      for (const [px, py] of [[selLine.x1, selLine.y1], [selLine.x2, selLine.y2]] as const) {
-        ctx.beginPath();
-        ctx.arc(px, py, 6 / transform.scale, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-    const selNode = page.treeNodes.find((n) => n.id === selectedNodeId);
-    if (selNode) {
-      ctx.strokeStyle = 'rgba(37,99,235,1)';
-      ctx.lineWidth = 2 / transform.scale;
-      ctx.beginPath();
-      ctx.arc(selNode.cx, selNode.cy, selNode.r + 3, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    const selRect = [...page.borderRects, ...page.tagRects].find((r) => r.id === selectedRectId);
-    if (selRect) {
-      ctx.strokeStyle = 'rgba(37,99,235,1)';
-      ctx.lineWidth = 2 / transform.scale;
-      ctx.strokeRect(selRect.x - 3, selRect.y - 3, selRect.w + 6, selRect.h + 6);
-    }
-    // 框选矩形
-    const drag = dragRef.current;
-    if (drag?.kind === 'rubber') {
-      ctx.strokeStyle = 'rgba(37,99,235,0.9)';
-      ctx.setLineDash([4 / transform.scale, 4 / transform.scale]);
-      ctx.strokeRect(
-        Math.min(drag.startX, drag.curX),
-        Math.min(drag.startY, drag.curY),
-        Math.abs(drag.curX - drag.startX),
-        Math.abs(drag.curY - drag.startY),
-      );
-      ctx.setLineDash([]);
-    }
+    drawSelectionOverlay(
+      ctx,
+      page,
+      { selectedCharIds, selectedLineId, selectedNodeId, selectedRectId, rubberBand },
+      transform.scale,
+      { showLowConf: true, showRubber: true, focusCharId },
+    );
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-  }, [page, transform, selectedCharIds, selectedLineId, selectedNodeId, selectedRectId, size, rebuildCache]);
+  }, [page, transform, selectedCharIds, selectedLineId, selectedNodeId, selectedRectId, rubberBand, size, rebuildCache, focusCharId]);
 
   /* ---------- 坐标换算与命中测试 ---------- */
   const toImage = useCallback(
@@ -326,6 +309,7 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
     // 空白：框选
     setSelection([]);
     dragRef.current = { kind: 'rubber', startX: x, startY: y, curX: x, curY: y };
+    setRubberBand({ x0: x, y0: y, x1: x, y1: y });
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -390,8 +374,7 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
     } else if (drag.kind === 'rubber') {
       drag.curX = x;
       drag.curY = y;
-      // 触发重绘
-      setTransform({});
+      setRubberBand({ x0: drag.startX, y0: drag.startY, x1: x, y1: y });
     } else if (drag.kind === 'lineEndpoint') {
       // 拖动中直接改数据做实时预览（不进命令栈），mouseup 时一次性提交为单条命令
       const patch = drag.end === 'p1' ? { x1: x, y1: y } : { x2: x, y2: y };
@@ -420,7 +403,10 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
     const drag = dragRef.current;
     dragRef.current = null;
     canvas.style.cursor = 'crosshair';
-    if (!drag) return;
+    if (!drag) {
+      setRubberBand(null);
+      return;
+    }
     const [x, y] = toImage(e.clientX, e.clientY);
     if (drag.kind === 'moveChars') {
       const dx = Math.round(x - drag.startX);
@@ -449,6 +435,7 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
           .map((c) => c.id);
         setSelection(ids);
       }
+      setRubberBand(null);
     } else if (drag.kind === 'moveLine') {
       const currentPage = useProjectStore.getState().currentPage();
       const cur = currentPage?.treeLines.find((line) => line.id === drag.lineId);
@@ -541,7 +528,7 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
   };
 
   return (
-    <div ref={containerRef} className="canvas-noselect relative h-full w-full overflow-hidden" aria-label="校对画布">
+    <div ref={containerRef} className="canvas-noselect relative h-full w-full overflow-hidden bg-[#f3f1ec]" aria-label="校对画布">
       <canvas
         ref={canvasRef}
         className="absolute inset-0 cursor-crosshair"
@@ -587,12 +574,8 @@ export default function ProofreadCanvas({ page }: { page: Page }) {
           </div>
         </div>
       )}
-      <div className="pointer-events-none absolute right-2 top-2 rounded bg-blue-700/80 px-2 py-1 text-xs text-white">
-        识别结果 · 可编辑
-      </div>
-      <div className="pointer-events-none absolute bottom-2 left-2 rounded bg-black/50 px-2 py-1 text-xs text-white">
-        缩放 {(transform.scale * 100).toFixed(0)}% · 双击改字/加字 · 拖动挪位 · Alt+拖动平移 · 滚轮缩放 · 字号换算
-        1mm={PT_PER_MM.toFixed(3)}pt
+      <div className="pointer-events-none absolute bottom-3 right-3 rounded-md bg-black/55 px-2.5 py-1 text-xs font-medium tabular-nums text-white backdrop-blur-sm">
+        {Math.round(transform.scale * 100)}%
       </div>
     </div>
   );

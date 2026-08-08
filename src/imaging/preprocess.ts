@@ -21,6 +21,8 @@ export interface PreprocessOptions {
   manualDeskewDeg?: number;
   /** 高精度模式：尝试 OpenCV.js 增强（懒加载，失败自动回退纯 JS） */
   useOpenCV?: boolean;
+  /** 二值化后加粗笔画（PDF 矢量渲染 anti-alias 断点修复，1=3×3 膨胀） */
+  strokeDilate?: number;
 }
 
 export interface PreprocessResult {
@@ -129,6 +131,27 @@ export function medianFilterBinary(bin: Uint8Array, width: number, height: numbe
       }
       win.sort((a, b) => a - b);
       out[y * width + x] = win[Math.floor(win.length / 2)];
+    }
+  }
+  return out;
+}
+
+/** 形态学膨胀：加粗细笔画、连接 anti-alias 断点 */
+export function dilateBinary(bin: Uint8Array, width: number, height: number, radius = 1): Uint8Array {
+  if (radius <= 0) return bin;
+  const out = new Uint8Array(bin.length);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (!bin[y * width + x]) continue;
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= height) continue;
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= width) continue;
+          out[yy * width + xx] = 1;
+        }
+      }
     }
   }
   return out;
@@ -244,6 +267,9 @@ export async function preprocessPipeline(
     const auto = otsuThreshold(gray);
     const t = opts.threshold !== undefined ? auto + opts.threshold : auto;
     binary = binarizeOtsu(gray, Math.max(1, Math.min(254, t)));
+  }
+  if (opts.strokeDilate && opts.strokeDilate > 0) {
+    binary = dilateBinary(binary, width, height, opts.strokeDilate);
   }
   report('deskew', 45);
 

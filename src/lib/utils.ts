@@ -1,5 +1,6 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import type { Page } from '@/model/types';
 
 /** shadcn 约定的类名合并工具 */
 export function cn(...inputs: ClassValue[]): string {
@@ -120,4 +121,17 @@ export async function runPool<T, R>(
 export function backoffDelay(attempt: number, baseMs = 1000): Promise<void> {
   const ms = baseMs * Math.pow(2, attempt) + Math.random() * 200;
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 尚未完成识别、需要跑分析管线的页面 */
+export function pagesPendingAnalysis(pages: Page[]): Page[] {
+  return pages.filter((p) => p.status === 'imported' || p.status === 'preprocessed' || p.status === 'analyzed');
+}
+
+/** 待分析页面 id 签名，用于判断是否有新增页需要批处理 */
+export function pendingAnalysisSignature(pages: Page[]): string {
+  return pagesPendingAnalysis(pages)
+    .map((p) => p.id)
+    .sort()
+    .join(',');
 }

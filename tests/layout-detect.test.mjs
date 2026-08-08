@@ -52,4 +52,15 @@ const junctionNodes = detectNodes(junctionBin, nodeWidth, nodeHeight, [
 ]);
 eq('横竖线交叉点不会生成假圆圈', junctionNodes.length, 0);
 
-summary('layout detect');
+section('PDF 矢量细页框');
+const pdfW = 800;
+const pdfH = 1100;
+const pdfBin = new Uint8Array(pdfW * pdfH);
+block(pdfBin, pdfW, 0, 0, pdfW, 4);
+block(pdfBin, pdfW, 0, 0, 4, pdfH);
+block(pdfBin, pdfW, pdfW - 4, 0, 4, pdfH);
+block(pdfBin, pdfW, 0, pdfH - 4, pdfW, 4);
+const pdfRects = detectRects(pdfBin, pdfW, pdfH);
+check('页边 4px 细框可被检出', pdfRects.borderRects.length >= 1);
+
+summary('layout detect pdf');

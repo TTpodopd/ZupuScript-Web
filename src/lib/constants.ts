@@ -68,6 +68,16 @@ export const CHAR_MIN_AREA = 20;
 export const MEDIAN_RADIUS = 1;
 /** 小连通域剔除的最小面积 */
 export const DENOISE_MIN_AREA = 8;
+/** 空白页判定：降采样后墨迹像素占比低于此值则视为空白（0.15%） */
+export const BLANK_PAGE_MAX_INK_RATIO = 0.0015;
+/** 空白页检测：亮度低于此灰度值计为墨迹 */
+export const BLANK_PAGE_DARK_THRESHOLD = 240;
+/** 空白页检测降采样最长边（像素） */
+export const BLANK_PAGE_PROBE_MAX_EDGE = 256;
+/** PDF 本地拆页渲染 DPI（矢量页框约 1pt，450 DPI 下约 6px，配合边缘检测可稳定识别） */
+export const PDF_RENDER_DPI = 450;
+/** PDF/矢量源二值化后笔画加粗半径（连接 anti-alias 断点，0=关闭） */
+export const PDF_STROKE_DILATE_RADIUS = 2;
 /** 节点圆扫描半径范围 */
 export const NODE_R_MIN = 6;
 export const NODE_R_MAX = 28;

@@ -39,9 +39,9 @@ export default function App() {
   }, [darkMode]);
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex h-dvh flex-col overflow-hidden">
       {/* 顶栏：宣纸底 + 柔和下边框 */}
-      <header className="sticky top-0 z-40 flex min-h-16 shrink-0 flex-wrap items-center gap-2 border-b bg-card/80 px-3 py-2 backdrop-blur-sm sm:h-16 sm:flex-nowrap sm:gap-3 sm:px-6 sm:py-0">
+      <header className="z-40 flex min-h-16 shrink-0 flex-wrap items-center gap-2 border-b bg-card/80 px-3 py-2 backdrop-blur-sm sm:h-16 sm:flex-nowrap sm:gap-3 sm:px-6 sm:py-0">
         {/* 品牌：朱砂印章 + 名称 */}
         <div className="mr-auto flex items-center gap-2.5 sm:mr-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground shadow-soft">
@@ -91,10 +91,22 @@ export default function App() {
       </header>
 
       {/* 主内容区 */}
-      <main className="min-h-0 flex-1">
-        {activeView === 'projects' && <ProjectListPage />}
-        {activeView === 'import' && <ImportPage />}
-        {activeView === 'analyze' && <AnalyzePage />}
+      <main className="min-h-0 flex-1 overflow-hidden">
+        {activeView === 'projects' && (
+          <div className="h-full overflow-y-auto">
+            <ProjectListPage />
+          </div>
+        )}
+        {activeView === 'import' && (
+          <div className="h-full overflow-y-auto">
+            <ImportPage />
+          </div>
+        )}
+        {activeView === 'analyze' && (
+          <div className="h-full overflow-y-auto">
+            <AnalyzePage />
+          </div>
+        )}
         {activeView === 'editor' && <EditorPage />}
       </main>
 

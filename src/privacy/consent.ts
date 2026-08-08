@@ -25,20 +25,34 @@ export function isForcedLocal(): boolean {
   return false;
 }
 
-/** 会话内同意记录（按模式记忆，刷新后需重新确认——更保守的隐私默认） */
+/** 会话内同意记录；持久化同意写入 localStorage，避免每次刷新重新确认 */
 const sessionConsent = new Set<PrivacyMode>();
+const CONSENT_STORAGE_PREFIX = 'zupu-cloud-consent-';
 
 export function hasConsented(mode: PrivacyMode): boolean {
-  if (mode === 'A') return true; // 全本地无需同意
-  return sessionConsent.has(mode);
+  if (mode === 'A') return true;
+  if (sessionConsent.has(mode)) return true;
+  if (typeof localStorage !== 'undefined') {
+    return localStorage.getItem(`${CONSENT_STORAGE_PREFIX}${mode}`) === '1';
+  }
+  return false;
 }
 
 export function grantConsent(mode: PrivacyMode): void {
+  if (mode === 'A') return;
   sessionConsent.add(mode);
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem(`${CONSENT_STORAGE_PREFIX}${mode}`, '1');
+  }
 }
 
 export function revokeConsent(): void {
   sessionConsent.clear();
+  if (typeof localStorage !== 'undefined') {
+    for (const mode of ['B', 'C'] as PrivacyMode[]) {
+      localStorage.removeItem(`${CONSENT_STORAGE_PREFIX}${mode}`);
+    }
+  }
 }
 
 /**

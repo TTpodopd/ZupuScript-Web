@@ -10,12 +10,19 @@ import { createEmptyPage } from '@/model/types';
 import { useProjectStore } from '@/store/projectStore';
 import { hasFSAccess, pickDirectory, readImageFilesFromDirectory } from '@/storage/fsaccess';
 import { putImage } from '@/storage/opfs';
-import { naturalCompare, uuid } from '@/lib/utils';
+import { naturalCompare, pagesPendingAnalysis, uuid } from '@/lib/utils';
 import { parseGeneratedScript } from '@/parser/scriptParser';
+import { isBlankCanvas, isBlankImageBlob } from '@/imaging/blankPage';
+import { PDF_RENDER_DPI } from '@/lib/constants';
 
 const IMAGE_RE = /\.(png|jpe?g|webp|tiff?)$/i;
 const PDF_RE = /\.pdf$/i;
-const PDF_RENDER_DPI = 300;
+
+interface PendingPdf {
+  id: string;
+  file: File;
+  pageRange: string;
+}
 
 /** 图像文件 → ImageData 尺寸探测（TIFF 等不支持的格式会抛错，由调用方提示） */
 async function probeImage(blob: Blob): Promise<{ width: number; height: number }> {
@@ -31,6 +38,7 @@ async function renderPdfPages(
   pageRange: string,
   dpi: number,
   onProgress: (done: number, total: number) => void,
+  onBlankPage?: (pageNo: number) => void,
 ): Promise<Array<{ pageNo: number; blob: Blob; width: number; height: number }>> {
   const pdfjs = await import('pdfjs-dist');
   const workerUrl = (await import('pdfjs-dist/build/pdf.worker.min.mjs?url')).default;
@@ -60,9 +68,15 @@ async function renderPdfPages(
     canvas.width = Math.ceil(viewport.width);
     canvas.height = Math.ceil(viewport.height);
     const ctx = canvas.getContext('2d')!;
+    ctx.imageSmoothingEnabled = false;
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+    if (isBlankCanvas(canvas)) {
+      onBlankPage?.(pageNo);
+      onProgress(++done, wanted.size);
+      continue;
+    }
     const blob = await new Promise<Blob>((resolve, reject) =>
       canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('PDF 页编码失败'))), 'image/png'),
     );
@@ -78,8 +92,14 @@ export default function ImportPage() {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [pdfRange, setPdfRange] = useState('');
+  const [pendingPdfs, setPendingPdfs] = useState<PendingPdf[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const scriptRef = useRef<HTMLInputElement>(null);
+
+  const hasContent = pages.length > 0 || pendingPdfs.length > 0;
+  const pendingPages = pagesPendingAnalysis(pages);
+  const readyPages = pages.filter((p) => p.chars.length > 0);
+  const hasPendingAnalysis = pendingPages.length > 0 || pendingPdfs.length > 0;
 
   const appendLog = useCallback((msg: string) => setLog((l) => [...l.slice(-30), msg]), []);
 
@@ -115,6 +135,10 @@ export default function ImportPage() {
         let index = pages.length;
         for (const f of sorted) {
           try {
+            if (await isBlankImageBlob(f)) {
+              appendLog(`已跳过空白页：${f.name}`);
+              continue;
+            }
             const { width, height } = await probeImage(f);
             const imageKey = `img_${uuid()}.png`;
             await putImage(imageKey, f);
@@ -135,50 +159,70 @@ export default function ImportPage() {
         if (newPages.length > 0) {
           addPages(newPages);
           setCurrentPage(newPages[0].id);
-          setView('analyze');
         }
       } finally {
         setBusy(false);
       }
     },
-    [currentProjectId, pages.length, addPages, appendLog],
+    [currentProjectId, pages.length, addPages, appendLog, setCurrentPage],
   );
 
   const importPdf = useCallback(
-    async (file: File) => {
-      if (!currentProjectId) return;
-      setBusy(true);
-      appendLog(`正在拆分 PDF：${file.name}（高精度 ${PDF_RENDER_DPI} DPI）…`);
-      try {
-        const rendered = await renderPdfPages(file, pdfRange, PDF_RENDER_DPI, (d, t) => appendLog(`PDF 渲染 ${d}/${t}`));
-        const newPages = [];
-        let index = pages.length;
-        for (const r of rendered) {
-          const imageKey = `img_${uuid()}.png`;
-          await putImage(imageKey, r.blob);
-          newPages.push(
-            createEmptyPage(
-              uuid(),
-              currentProjectId,
-              index++,
-              { name: `${file.name} 第${r.pageNo}页`, page: r.pageNo, widthPx: r.width, heightPx: r.height, dpi: PDF_RENDER_DPI },
-              imageKey,
-            ),
-          );
-        }
-        addPages(newPages);
-        if (newPages.length > 0) {
-          setCurrentPage(newPages[0].id);
-          setView('analyze');
-        }
-        appendLog(`PDF 拆页完成：${rendered.length} 页`);
-      } catch (err) {
-        appendLog(`PDF 处理失败：${err instanceof Error ? err.message : String(err)}`);
-      } finally {
-        setBusy(false);
+    async (file: File, pageRange: string) => {
+      if (!currentProjectId) return 0;
+      appendLog(`正在拆分 PDF：${file.name}（${PDF_RENDER_DPI} DPI）…`);
+      let skippedBlank = 0;
+      const rendered = await renderPdfPages(
+        file,
+        pageRange,
+        PDF_RENDER_DPI,
+        (d, t) => appendLog(`PDF 渲染 ${d}/${t}`),
+        (pageNo) => {
+          skippedBlank++;
+          appendLog(`已跳过空白页：${file.name} 第${pageNo}页`);
+        },
+      );
+      const newPages = [];
+      let index = useProjectStore.getState().pages.length;
+      for (const r of rendered) {
+        const imageKey = `img_${uuid()}.png`;
+        await putImage(imageKey, r.blob);
+        newPages.push(
+          createEmptyPage(
+            uuid(),
+            currentProjectId,
+            index++,
+            { name: `${file.name} 第${r.pageNo}页`, page: r.pageNo, widthPx: r.width, heightPx: r.height, dpi: PDF_RENDER_DPI },
+            imageKey,
+          ),
+        );
       }
+      if (newPages.length > 0) {
+        addPages(newPages);
+        setCurrentPage(newPages[0].id);
+      }
+      appendLog(
+        rendered.length > 0
+          ? `PDF 拆页完成：${rendered.length} 页${skippedBlank > 0 ? `，已跳过 ${skippedBlank} 页空白` : ''}`
+          : skippedBlank > 0
+            ? `PDF 拆页完成：全部为空白页，已跳过 ${skippedBlank} 页`
+            : 'PDF 拆页完成：0 页',
+      );
+      return newPages.length;
     },
-    [currentProjectId, pages.length, pdfRange, addPages, appendLog],
+    [currentProjectId, addPages, appendLog, setCurrentPage],
+  );
+
+  const queuePdfFiles = useCallback(
+    (files: File[]) => {
+      if (files.length === 0) return;
+      setPendingPdfs((current) => [
+        ...current,
+        ...files.map((file) => ({ id: uuid(), file, pageRange: pdfRange })),
+      ]);
+      appendLog(`已添加 ${files.length} 个 PDF，请在下方设置页码范围后点击「开始分析」`);
+    },
+    [appendLog, pdfRange],
   );
 
   const handleFiles = useCallback(
@@ -190,10 +234,35 @@ export default function ImportPage() {
         else if (IMAGE_RE.test(f.name) || f.type.startsWith('image/')) images.push(f);
       }
       if (images.length > 0) void importImageFiles(images);
-      for (const p of pdfs) void importPdf(p);
+      if (pdfs.length > 0) queuePdfFiles(pdfs);
     },
-    [importImageFiles, importPdf],
+    [importImageFiles, queuePdfFiles],
   );
+
+  const startAnalysis = async () => {
+    if (busy || !hasContent) return;
+    setBusy(true);
+    try {
+      const queued = [...pendingPdfs];
+      for (const item of queued) {
+        try {
+          await importPdf(item.file, item.pageRange);
+        } catch (err) {
+          appendLog(`PDF 处理失败（${item.file.name}）：${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      setPendingPdfs([]);
+      const latestPages = useProjectStore.getState().pages;
+      if (latestPages.length === 0) return;
+      if (pagesPendingAnalysis(latestPages).length > 0) {
+        setView('analyze');
+      } else {
+        setView('editor');
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
 
   // Ctrl+V 粘贴（F1.1）
   useEffect(() => {
@@ -239,7 +308,7 @@ export default function ImportPage() {
         className={`mb-5 rounded-2xl border-2 border-dashed p-8 text-center transition-all duration-300 sm:p-10 ${
           dragOver
             ? 'border-primary bg-primary/5 card-shadow-lg'
-            : pages.length > 0
+            : hasContent
               ? 'border-emerald-300 bg-emerald-50/50 card-shadow dark:border-emerald-800 dark:bg-emerald-950/20'
               : 'border-border bg-card card-shadow'
         }`}
@@ -260,20 +329,24 @@ export default function ImportPage() {
         onKeyDown={(e) => e.key === 'Enter' && fileRef.current?.click()}
       >
         <div className={`mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl transition-colors ${
-          dragOver ? 'bg-primary/10' : pages.length > 0 ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300' : 'bg-muted/60'
+          dragOver ? 'bg-primary/10' : hasContent ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300' : 'bg-muted/60'
         }`}>
-          {pages.length > 0 ? (
+          {hasContent ? (
             <CheckCircle2 className="h-7 w-7" />
           ) : (
             <ImagePlus className={`h-6 w-6 transition-colors ${dragOver ? 'text-primary' : 'text-muted-foreground'}`} />
           )}
         </div>
         <p className="text-sm font-medium">
-          {pages.length > 0 ? `资料上传完成 · ${pages.length} 页已就绪` : '拖入图像 / PDF，或点击选择文件'}
+          {hasContent
+            ? `资料上传完成 · ${pages.length} 页已就绪${pendingPdfs.length > 0 ? ` · ${pendingPdfs.length} 个 PDF 待设置` : ''}`
+            : '拖入图像 / PDF，或点击选择文件'}
         </p>
         <p className="mt-1.5 text-xs text-muted-foreground">
-          {pages.length > 0
-            ? '可继续拖入或点击添加更多资料；确认无误后开始高精度分析'
+          {hasContent
+            ? readyPages.length > 0
+              ? `已有 ${readyPages.length} 页分析结果，可继续追加新资料；确认设置后点击「开始分析」处理新增页`
+              : '可继续拖入或点击添加更多资料；确认设置无误后点击「开始分析」'
             : '支持 PNG / JPG / WebP / PDF，也可以直接 Ctrl+V 粘贴剪切板图像'}
         </p>
         <input
@@ -289,29 +362,80 @@ export default function ImportPage() {
         />
       </div>
 
+      {/* 上传后：分析设置（PDF 页码等） */}
+      {hasContent && (
+        <div className="mb-4 rounded-2xl border bg-card p-4 card-shadow">
+          <div className="mb-3">
+            <h2 className="text-sm font-medium">分析设置</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              上传完成后可在此调整 PDF 页码范围；图像会立即导入，PDF 将在点击「开始分析」时按设置拆页。
+            </p>
+          </div>
+          <div className="space-y-3">
+            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+              <div className="min-w-0">
+                <Label htmlFor="pdf-range-default">PDF 默认页码范围</Label>
+                <Input
+                  id="pdf-range-default"
+                  value={pdfRange}
+                  onChange={(e) => setPdfRange(e.target.value)}
+                  placeholder="如 1-3,5（留空表示全部页）"
+                  className="mt-1 w-full rounded-xl"
+                />
+                <p className="mt-1 text-xs text-muted-foreground">新添加的 PDF 会使用此默认值，也可在下方逐个修改。</p>
+              </div>
+            </div>
+            {pendingPdfs.length > 0 && (
+              <ul className="space-y-2 rounded-xl border bg-muted/20 p-2">
+                {pendingPdfs.map((item) => (
+                  <li key={item.id} className="grid gap-2 rounded-lg bg-card p-3 sm:grid-cols-[minmax(0,1fr)_minmax(180px,0.8fr)_auto] sm:items-end">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium" title={item.file.name}>{item.file.name}</p>
+                      <p className="text-xs text-muted-foreground">待拆页 · {PDF_RENDER_DPI} DPI</p>
+                    </div>
+                    <div className="min-w-0">
+                      <Label htmlFor={`pdf-range-${item.id}`} className="text-xs">页码范围</Label>
+                      <Input
+                        id={`pdf-range-${item.id}`}
+                        value={item.pageRange}
+                        onChange={(e) =>
+                          setPendingPdfs((current) =>
+                            current.map((entry) => (entry.id === item.id ? { ...entry, pageRange: e.target.value } : entry)),
+                          )
+                        }
+                        placeholder="如 1-3,5（留空全部）"
+                        className="mt-1 w-full rounded-xl"
+                      />
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="rounded-lg text-destructive hover:bg-destructive/10"
+                      onClick={() => setPendingPdfs((current) => current.filter((entry) => entry.id !== item.id))}
+                    >
+                      移除
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* 辅助导入方式 */}
       <div className="mb-4 rounded-2xl border bg-card p-4 card-shadow">
         <div className="mb-3">
           <h2 className="text-sm font-medium">其他导入方式</h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">PDF 可指定页码范围；也可以批量读取文件夹或直接打开 Scribus 脚本。</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">批量读取文件夹，或直接打开 Scribus 脚本到画布。</p>
         </div>
-        <div className="grid gap-3 md:grid-cols-[minmax(180px,0.8fr)_minmax(220px,1fr)_minmax(220px,1fr)] md:items-end">
-          <div className="min-w-0">
-            <Label htmlFor="pdf-range">PDF 页码范围</Label>
-          <Input
-            id="pdf-range"
-            value={pdfRange}
-            onChange={(e) => setPdfRange(e.target.value)}
-            placeholder="如 1-3,5（留空全部）"
-              className="w-full rounded-xl"
-          />
-          </div>
+        <div className="grid gap-3 sm:grid-cols-2">
           {hasFSAccess() ? (
             <Button variant="outline" onClick={() => void handleFolder()} disabled={busy} className="w-full rounded-xl">
               <FolderInput className="h-4 w-4" /> 从文件夹批量导入
             </Button>
           ) : (
-            <div />
+            <div className="hidden sm:block" />
           )}
           <Button variant="outline" onClick={() => scriptRef.current?.click()} disabled={busy} className="w-full rounded-xl">
             <FileCode2 className="h-4 w-4" /> 导入脚本到画布
@@ -333,25 +457,53 @@ export default function ImportPage() {
       <div className="mb-6 rounded-2xl border border-primary/20 bg-primary/5 p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium text-foreground">{pages.length > 0 ? `${pages.length} 页资料已准备完成` : '请先上传需要处理的资料'}</p>
-            <p className="mt-1 text-xs text-muted-foreground">开始后自动完成去斜、增强、版面检测和字符分割，无需选择算法参数。</p>
+            <p className="text-sm font-medium text-foreground">
+              {hasContent
+                ? hasPendingAnalysis
+                  ? `${pages.length} 页已导入，其中 ${pendingPages.length + pendingPdfs.length} 页待分析${readyPages.length > 0 ? `（另有 ${readyPages.length} 页已完成）` : ''}`
+                  : `${pages.length} 页均已分析完成`
+                : '请先上传需要处理的资料'}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {hasPendingAnalysis
+                ? '开始后将仅处理待分析的新增页，已有识别结果会保留。'
+                : '开始后将自动完成去斜、增强、版面检测和字符分割，无需选择算法参数。'}
+            </p>
           </div>
           {busy && <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" />}
-          <Button onClick={() => setView(pages.some((p) => p.chars.length > 0) ? 'editor' : 'analyze')} disabled={pages.length === 0 || busy} className="w-full shrink-0 rounded-xl sm:w-auto">
-            {pages.some((p) => p.chars.length > 0) ? '打开结果画布 →' : '开始高精度分析 →'}
+          <Button onClick={() => void startAnalysis()} disabled={!hasContent || busy} className="w-full shrink-0 rounded-xl sm:w-auto">
+            {hasPendingAnalysis ? '开始分析 →' : readyPages.length > 0 ? '打开结果画布 →' : '开始分析 →'}
           </Button>
         </div>
       </div>
 
       {/* 已导入页面列表 */}
-      <h2 className="mb-3 text-sm font-medium">已导入页面（{pages.length}）</h2>
-      {pages.length === 0 ? (
+      <h2 className="mb-3 text-sm font-medium">已导入页面（{pages.length + pendingPdfs.length}）</h2>
+      {pages.length === 0 && pendingPdfs.length === 0 ? (
         <div className="mb-6 flex items-center gap-3 rounded-xl border border-dashed bg-card/70 px-4 py-4 text-sm text-muted-foreground">
           <ImagePlus className="h-5 w-5 shrink-0" />
           <span>还没有页面。拖入图像、选择 PDF，或导入 Scribus 脚本后，页面会显示在这里。</span>
         </div>
       ) : (
         <ul className="mb-6 max-h-64 space-y-1 overflow-y-auto rounded-xl border bg-card p-2 card-shadow">
+          {pendingPdfs.map((item, index) => (
+            <li key={item.id} className="flex items-center gap-2.5 rounded-lg bg-amber-50/80 px-3 py-2 text-sm dark:bg-amber-950/20">
+              <span className="w-8 shrink-0 text-muted-foreground">待{index + 1}</span>
+              <span className="min-w-0 flex-1 truncate" title={item.file.name}>{item.file.name}</span>
+              <span className="hidden shrink-0 text-xs text-muted-foreground sm:inline">
+                PDF · {item.pageRange.trim() || '全部页'}
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setPendingPdfs((current) => current.filter((entry) => entry.id !== item.id))}
+                aria-label="移除待处理 PDF"
+                className="shrink-0 rounded-lg text-destructive hover:bg-destructive/10"
+              >
+                删除
+              </Button>
+            </li>
+          ))}
           {pages.map((p) => (
             <li key={p.id} className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-accent">
               <span className="w-8 shrink-0 text-muted-foreground">#{p.index + 1}</span>
@@ -360,6 +512,7 @@ export default function ImportPage() {
               </button>
               <span className="hidden shrink-0 text-xs text-muted-foreground sm:inline">
                 {p.source.widthPx}×{p.source.heightPx}
+                {p.chars.length > 0 ? ' · 已完成' : ' · 待分析'}
               </span>
               <Button size="sm" variant="ghost" onClick={() => void removePage(p.id)} aria-label="删除本页" className="shrink-0 rounded-lg text-destructive hover:bg-destructive/10">
                 删除
@@ -367,6 +520,17 @@ export default function ImportPage() {
             </li>
           ))}
         </ul>
+      )}
+
+      {log.length > 0 && (
+        <div className="rounded-xl border bg-muted/30 p-3">
+          <p className="mb-2 text-xs font-medium text-muted-foreground">导入日志</p>
+          <ul className="max-h-32 space-y-1 overflow-y-auto text-xs text-muted-foreground">
+            {log.map((entry, index) => (
+              <li key={`${index}-${entry}`}>{entry}</li>
+            ))}
+          </ul>
+        </div>
       )}
 
     </div>
