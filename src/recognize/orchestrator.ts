@@ -36,12 +36,14 @@ import { geminiProvider } from './providers/gemini';
 import { openaiProvider } from './providers/openai';
 import { anthropicProvider } from './providers/anthropic';
 import { customProvider } from './providers/custom';
+import { deepseekProvider } from './providers/deepseek';
 import { applyGlyphVerification, type GlyphVerifyInput } from './glyphVerify';
 
 const PROVIDERS: Record<Exclude<ProviderId, 'local'>, LLMProvider> = {
   gemini: geminiProvider,
   openai: openaiProvider,
   anthropic: anthropicProvider,
+  deepseek: deepseekProvider,
   custom: customProvider,
 };
 

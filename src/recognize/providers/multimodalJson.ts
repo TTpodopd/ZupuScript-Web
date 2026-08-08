@@ -209,6 +209,7 @@ export async function callConfiguredMultimodalJson(
     case 'anthropic':
       return callAnthropic(cfg, req, maxTokens);
     case 'custom':
+    case 'deepseek':
       return callCompatible(cfg, req, maxTokens);
     default:
       throw new Error(`当前模式（${cfg.provider}）不支持视觉分析`);

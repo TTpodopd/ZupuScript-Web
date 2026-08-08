@@ -4,7 +4,7 @@
  */
 import type { CharNote, PrivacyMode } from '@/model/types';
 
-export type ProviderId = 'gemini' | 'openai' | 'anthropic' | 'custom' | 'local';
+export type ProviderId = 'gemini' | 'openai' | 'anthropic' | 'deepseek' | 'custom' | 'local';
 
 export interface ProviderConfig {
   provider: ProviderId;

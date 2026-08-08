@@ -88,6 +88,17 @@ export const DEFAULT_MODEL_CONNECTIONS: ModelConnection[] = [
     expanded: false,
   },
   {
+    id: 'official-deepseek',
+    kind: 'official',
+    name: 'DeepSeek API',
+    description: 'DeepSeek 官方 OpenAI 兼容接口。保存 Key 后加密存于本机，下次打开无需重填。',
+    provider: 'deepseek',
+    endpoint: 'https://api.deepseek.com',
+    proxyUrl: '',
+    models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
+    expanded: false,
+  },
+  {
     id: 'compatible-default',
     kind: 'compatible',
     name: '自定义分组',
@@ -103,6 +114,18 @@ export const DEFAULT_MODEL_CONNECTIONS: ModelConnection[] = [
 function ensureLocalConnection(connections: ModelConnection[]): ModelConnection[] {
   const rest = connections.filter((c) => c.id !== LOCAL_MODEL_CONNECTION_ID);
   return [LOCAL_MODEL_CONNECTION, ...rest];
+}
+
+/** 为已持久化设置补全新增的官方分组（如 DeepSeek） */
+function migrateConnections(connections: ModelConnection[]): ModelConnection[] {
+  let next = [...connections];
+  for (const defaults of DEFAULT_MODEL_CONNECTIONS) {
+    if (defaults.kind !== 'official') continue;
+    if (next.some((c) => c.id === defaults.id)) continue;
+    const anchor = next.findIndex((c) => c.id === 'official-anthropic');
+    next.splice(anchor >= 0 ? anchor + 1 : next.length, 0, { ...defaults });
+  }
+  return next;
 }
 
 /** 批处理队列任务（P1 预留类型，极简实现只顺序跑本地分析） */
@@ -277,7 +300,9 @@ export const useSettingsStore = create<SettingsState>()(
       name: 'zupuscript-settings',
       merge: (persisted, current) => {
         const saved = persisted as Partial<SettingsState>;
-        const connections = ensureLocalConnection(saved.connections?.length ? saved.connections : current.connections);
+        const connections = ensureLocalConnection(
+          migrateConnections(saved.connections?.length ? saved.connections : current.connections),
+        );
         const activeConnectionId = saved.activeConnectionId && connections.some((c) => c.id === saved.activeConnectionId) ? saved.activeConnectionId : current.activeConnectionId;
         const active = connections.find((c) => c.id === activeConnectionId) ?? connections[0];
         const activeModelId = saved.activeModelId && active?.models.some((m) => m.id === saved.activeModelId) ? saved.activeModelId : active?.models[0]?.id ?? current.activeModelId;

@@ -20,8 +20,18 @@ const providerOptions: Array<{ value: ProviderId; label: string }> = [
   { value: 'gemini', label: 'Google Gemini' },
   { value: 'openai', label: 'OpenAI' },
   { value: 'anthropic', label: 'Anthropic Claude' },
+  { value: 'deepseek', label: 'DeepSeek' },
   { value: 'custom', label: 'OpenAI 兼容端点' },
 ];
+
+function modelsListUrl(connection: ModelConnection): string {
+  const base = connection.endpoint.replace(/\/$/, '');
+  if (connection.provider === 'gemini') return `${base}/v1beta/models`;
+  if (connection.kind === 'compatible' || connection.provider === 'openai' || connection.provider === 'deepseek') {
+    return `${base.replace(/\/v1$/i, '')}/v1/models`;
+  }
+  return `${base}/v1/models`;
+}
 
 function connectionLabel(connection: ModelConnection): string {
   if (connection.kind === 'local') return '本地引擎';
@@ -90,10 +100,7 @@ function ModelConnectionsPanel() {
         setTestMessage((s) => ({ ...s, [connection.id]: '请先保存 API Key' }));
         return;
       }
-      const base = connection.endpoint.replace(/\/$/, '');
-      const target = connection.kind === 'compatible'
-        ? `${base.replace(/\/v1$/i, '')}/v1/models`
-        : `${base}/v1beta/models`;
+      const target = modelsListUrl(connection);
       const url = connection.proxyUrl ? (() => { const u = new URL(connection.proxyUrl); u.searchParams.set('target', target); return u.toString(); })() : target;
       const headers: Record<string, string> = { Authorization: `Bearer ${savedKey}` };
       const response = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
@@ -134,7 +141,11 @@ function ModelConnectionsPanel() {
               <div className="md:col-span-2"><Label>分组名称</Label><Input value={connection.name} onChange={(e) => settings.updateConnection(connection.id, { name: e.target.value })} /></div>
               <div className="md:col-span-2"><Label>说明</Label><Input value={connection.description} onChange={(e) => settings.updateConnection(connection.id, { description: e.target.value })} /></div>
               {connection.kind === 'official' ? (
-                <div><Label>官方服务</Label><Select value={connection.provider} onChange={(e) => settings.updateConnection(connection.id, { provider: e.target.value as ProviderId })} options={providerOptions.filter((p) => p.value !== 'custom')} /></div>
+                connection.id === 'official-deepseek' ? (
+                  <div><Label>官方服务</Label><Input value="DeepSeek" readOnly disabled /></div>
+                ) : (
+                  <div><Label>官方服务</Label><Select value={connection.provider} onChange={(e) => settings.updateConnection(connection.id, { provider: e.target.value as ProviderId })} options={providerOptions.filter((p) => p.value !== 'custom' && p.value !== 'deepseek')} /></div>
+                )
               ) : (
                 <div className="md:col-span-2"><Label>API Base URL</Label><Input value={connection.endpoint} onChange={(e) => settings.updateConnection(connection.id, { endpoint: e.target.value })} placeholder="https://api.example.com/v1" /><p className="mt-1 text-xs text-muted-foreground">填写到 /v1，不要包含 /chat/completions。</p></div>
               )}
