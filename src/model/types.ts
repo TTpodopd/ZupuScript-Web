@@ -5,6 +5,8 @@
 import type { ProviderId } from '@/recognize/types';
 
 export type PageStatus = 'imported' | 'preprocessed' | 'analyzed' | 'recognized' | 'proofread' | 'exported';
+/** 资料来源：扫描图 / PDF 拆页 / 脚本导入 */
+export type SourceKind = 'image' | 'pdf' | 'script';
 /** A 全本地 / B 拼图上云（遗留） / C 整页上云（远端默认） */
 export type PrivacyMode = 'A' | 'B' | 'C';
 export type CharSource = 'llm' | 'local' | 'manual';
@@ -78,6 +80,8 @@ export interface ArtifactStroke {
 }
 
 export interface SourceInfo {
+  /** 资料类型；旧项目可省略，运行时由 resolveSourceKind 推断 */
+  kind?: SourceKind;
   name: string;
   page?: number;
   widthPx: number;

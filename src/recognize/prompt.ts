@@ -7,6 +7,7 @@
  */
 import { SURNAMES } from './dict/surnames';
 import { GENEALOGY_TERMS } from './dict/genealogy';
+import type { CharNote } from '@/model/types';
 
 /** 姓氏 TOP100（内嵌提示词先验） */
 const SURNAMES_TOP100 = SURNAMES.slice(0, 100).join('、');
@@ -15,7 +16,7 @@ const SURNAMES_TOP100 = SURNAMES.slice(0, 100).join('、');
 const GENEALOGY_PRIOR = GENEALOGY_TERMS.slice(0, 80).join('、');
 
 /** 修改提示词或识别规则时升级，防止复用旧模型缓存。 */
-export const RECOGNITION_PROMPT_VERSION = 'genealogy-ocr-v5';
+export const RECOGNITION_PROMPT_VERSION = 'genealogy-ocr-v12';
 export const LAYOUT_BORDER_PROMPT_VERSION = 'border-layout-v1';
 
 export const LAYOUT_BORDER_SYSTEM_PROMPT = [
@@ -163,6 +164,7 @@ export const SYSTEM_PROMPT = [
   '4.【一项一字】拼图每格、整页结果每项只返回一个字符；若裁剪格明显粘连两个字则返回 multi 标记。',
   '5.【禁止解释】只输出 JSON，不输出任何说明文字。',
   '6.【数量守恒】返回条目数必须等于输入格数，一个都不能少。',
+  '7.【仅限汉字】char 与 candidates 只能是汉字（含繁体、异体、扩展区），严禁输出英文字母、阿拉伯数字、标点、箭头或任何符号；无法确认为汉字时 char=null。',
   '',
   '【置信度标定】',
   '- 0.95-1.00：主要部件和关键笔画清晰，多种解释中只有一个成立。',
@@ -177,13 +179,17 @@ export const SYSTEM_PROMPT = [
 ].join('\n');
 
 /** B 模式用户提示词（随网格尺寸动态生成） */
-export function buildGridUserPrompt(cols: number, rows: number, count: number, draft: GridPromptDraft[] = []): string {
+export function buildGridUserPrompt(cols: number, rows: number, count: number, draft: GridPromptDraft[] = [], pageNumberIds: number[] = []): string {
   const parts = [
     `附件是 ${cols}x${rows} 编号字符网格，共 ${count} 格。每格白底黑字，左上角红色数字是 id，不是待识别文字。`,
     '编号已随机打乱，与族谱阅读顺序、人物关系和上下文无关。必须按红色 id 逐格独立识别。',
     '逐格放大观察部首结构、关键笔画、封闭区域和断笔连接；不要把格线、红色编号、污点识别成文字。',
+    'char 与 candidates 只允许汉字；字母、数字、标点、箭头、符号一律无效，返回 char=null。',
     '繁体、异体、俗体必须保持原字形。清晰的一格只输出一个字；空白格返回 null；粘连两个字时 note=multi。',
   ];
+  if (pageNumberIds.length > 0) {
+    parts.push(`页码专用提示：编号 ${pageNumberIds.join('、')} 来自左下竖排页码区，通常是汉字数字「一二三四五六七八九十」之一。必须依据该格真实字形识别，不得固定猜测，也不得返回阿拉伯数字。`);
+  }
   if (draft.length > 0) {
     parts.push(
       '下面是本地 OCR 候选，仅供对照，可能为空或错误。必须以附件字形为准，不得直接照抄：',
@@ -206,47 +212,94 @@ export function buildReviewPrompt(draft: string, count: number): string {
   ].join('\n');
 }
 
+/** C 模式锚点填字专用规则（与 anchors JSON 配套） */
+export const ANCHORED_FILL_RULES = [
+  '【锚点填字规则 — 最高优先级，违反则整页无效】',
+  '0. 本地程序按 id 严格一对一填字：items[id].char 只写入第 id 个字框，绝不按坐标重新匹配或交换字框。',
+  '1. items.length 必须等于 anchors.length；anchors 中列出的每个 id 恰好出现一次，不得多报或漏报 id。',
+  '2. 每条记录的 rx、ry 必须从 anchors 中同 id 条目原样复制（保留 4 位小数），禁止自行估算、四舍五入重算或按阅读顺序改写坐标。',
+  '3. char 必须是 anchors[id] 坐标点处原图可见的单个汉字；禁止把同列上一字、下一字、邻列同高字填入当前 id。',
+  '4. 竖排族谱阅读顺序（列右→左、列内上→下）仅用于你扫描图像，不得据此调换 id 与 char 的对应关系。',
+  '5. anchors[id] 处无字、只有谱系线/节点/污点 → char=null，confidence<0.6，rx/ry 仍复制 anchors[id]。',
+  '6. 填完后自检：若把 char 填到相邻 id 更合理，说明串位，必须改 char 而非改 id/rx/ry。',
+  '7. 谱系图多列网格（如「三子/次子/長子」下各列人名）每列独立：id 对应该列该行的字心，禁止跨列填字。',
+  '',
+  '【反串位示例】若 anchors[3] 在右列、anchors[4] 在左列且同高，则 id=3 的 char 必须是右列该点汉字，不能把左列同高字填进 id=3；rx/ry 仍分别复制 anchors[3] 与 anchors[4]。',
+  '8. char 与 candidates 只能是汉字；字母、数字、标点、箭头等符号视为识别失败，char=null、confidence<0.6。',
+].join('\n');
+
 /** C 模式用户提示词（整页识别 + 相对坐标） */
 export const PAGE_USER_PROMPT = [
-  '附件是一页竖排繁体中文族谱、家谱或世系图扫描页。请识别所有真实可见文字，并给出每个字中心的相对坐标 rx/ry（0 到 1，原点在左上角）。',
-  '先扫描页边标题、卷次和页码，再扫描正文区域。正文通常按列从上到下、从右到左，但坐标必须以实际位置为准。',
+  '附件是一页竖排繁体中文族谱、家谱或世系图扫描页。请识别所有真实可见文字，并给出每个字中心的相对坐标 rx/ry（0 到 1，原点在左上角，x 向右、y 向下）。',
+  '坐标精度要求：rx/ry 必须对应该字墨迹的几何中心，误差应小于字宽的 1/4；不要用整列或整行中心代替单字中心。',
+  '先扫描页边标题、卷次和页码，再扫描正文区域。正文通常按列从上到下、从右到左，但每个字的坐标必须独立精确。',
   '必须覆盖姓名、排行、称谓、配偶、生卒葬信息、旁注和节点附近小字；不得只识别大字或主干姓名。',
   '严格区分文字与外框、谱系连接线、圆形节点、装饰块、箭头、污点和破损痕迹，这些图形不得生成字符。',
   '逐字保留繁体、异体和俗体原字形。字形不清时返回 null 和低置信度，不得根据亲属关系或常见姓名补全。',
+  'char 只允许汉字（含异体、扩展区）；字母、数字、标点、箭头等符号一律不得输出，对应 char=null。',
   '完成后进行覆盖检查：检查顶部、底部、左右侧栏和各谱系分支是否漏字；检查是否有重复坐标或虚构字符。',
   '输出完整 JSON，禁止解释。',
 ].join('\n');
 
 /** C 模式用户提示词（整页 + 本地分割锚点，保证字位数量守恒） */
 export function buildPageAnchoredUserPrompt(
-  chars: Array<{ cx: number; cy: number; kind?: string; group?: string }>,
+  chars: Array<{ cx: number; cy: number; kind?: string; group?: string; skipAnchor?: boolean }>,
   widthPx: number,
   heightPx: number,
 ): string {
-  const anchors = chars.map((c, id) => ({
-    id,
-    rx: Math.round((c.cx / widthPx) * 10000) / 10000,
-    ry: Math.round((c.cy / heightPx) * 10000) / 10000,
-    ...(c.kind === 'side' ? { region: 'margin' as const, group: c.group ?? 'title' } : {}),
-  }));
+  const anchors = chars
+    .map((c, id) => ({
+      id,
+      rx: Math.round((c.cx / widthPx) * 10000) / 10000,
+      ry: Math.round((c.cy / heightPx) * 10000) / 10000,
+      skip: Boolean(c.skipAnchor),
+      ...(c.kind === 'side' ? { region: 'margin' as const, group: c.group ?? 'title' } : {}),
+    }))
+    .filter((a) => !a.skip)
+    .map(({ skip: _skip, ...rest }) => rest);
   return [
+    ANCHORED_FILL_RULES,
+    '',
     PAGE_USER_PROMPT,
     '',
-    `【字位锚点】本地分割已标出 ${anchors.length} 个待识字，下列 id/rx/ry 为各字中心相对坐标（0–1，原点左上）。`,
-    'region=margin 的锚点为页边标题或页码，字号可能与正文差异很大，请优先对照原图逐字识别，不得漏字。',
-    '你必须为每个 id 返回恰好一条 items 记录：items.length 必须等于锚点数量，id 从 0 到 count-1 各出现一次，不得遗漏、合并或虚构。',
-    'char 应对应该 id 坐标处可见字形；看不清返回 null；谱系线、节点圆、外框不是文字。',
-    JSON.stringify({ anchors }),
+    `【字位锚点】本地分割已标出 ${anchors.length} 个待识字（${widthPx}×${heightPx}px）。`,
+    '下列 anchors 中每个 id 对应一个待填字位；你必须为每个 id 输出一条 items 记录。',
+    '关键：items[i].rx 与 items[i].ry 必须等于 anchors 中 id=i 的 rx/ry（原样复制），items[i].char 为该坐标处的可见汉字。',
+    'region=margin 的锚点为页边标题、书名或页码（常见汉字数字如「三一」「卷二」，竖排），字号可能与正文差异很大，仍须逐 id 填 char，不得漏 id。',
+    JSON.stringify({ count: anchors.length, anchors }),
   ].join('\n');
 }
 
-/** 整页锚点识别二次校验 */
-export function buildPageAnchoredReviewPrompt(draft: string, count: number): string {
+/** 整页锚点识别二次校验（附 anchors 防串位） */
+export function buildPageAnchoredReviewPrompt(
+  draft: string,
+  chars: Array<{ cx: number; cy: number; skipAnchor?: boolean }>,
+  widthPx: number,
+  heightPx: number,
+): string {
+  const anchors = chars
+    .map((c, id) => ({
+      id,
+      rx: Math.round((c.cx / widthPx) * 10000) / 10000,
+      ry: Math.round((c.cy / heightPx) * 10000) / 10000,
+      skip: Boolean(c.skipAnchor),
+    }))
+    .filter((a) => !a.skip)
+    .map(({ skip: _skip, ...rest }) => rest);
   return [
-    `附件仍是同一页族谱整页图。本地分割共 ${count} 个字位锚点。第一次识别 JSON：`,
+    ANCHORED_FILL_RULES,
+    '',
+    `附件仍是同一页族谱整页图（${widthPx}×${heightPx}px）。本地分割共 ${anchors.length} 个字位锚点。`,
+    '第一次识别 JSON 草稿（待审，可能有 id/char 串位）：',
     draft,
-    `请逐 id 重新对照原图复核，items 长度必须仍为 ${count}，每个 id 恰好一条。`,
-    '纠正误字、漏字与 confidence；无法确认返回 null。只输出 JSON。',
+    '',
+    '复核步骤：',
+    '1. 对每个 id，放大原图 anchors[id] 坐标处，核对 char 是否为该点汉字；错误则改 char，禁止改 rx/ry（须与 anchors 一致）。',
+    '2. 重点检查谱系分支多列网格、邻列同高、排行标签（三子/次子/長子）附近是否串位。',
+    '3. items.length 必须仍为 ' + anchors.length + '；无法确认 char=null。',
+    '锚点坐标（rx/ry 必须原样复制）：',
+    JSON.stringify({ anchors }),
+    '只输出完整 JSON items，不要解释。',
   ].join('\n');
 }
 
@@ -330,7 +383,24 @@ export function extractJson(text: string): unknown {
 /** 校验单条识别结果：char 必须为 null、单字符、或带 multi 标记的双字符（F4.6 校验链） */
 export function isValidChar(char: string | null, note?: string): boolean {
   if (char === null) return true;
-  if (note === 'multi') return char.length <= 2;
-  // 单字符且非 ASCII（族谱场景为汉字/异体字）
-  return [...char].length === 1 && !/^[\x20-\x7E]$/.test(char);
+  const glyphs = [...char];
+  if (note === 'multi') return glyphs.length <= 2 && glyphs.every(isCjkGlyph);
+  return glyphs.length === 1 && isCjkGlyph(glyphs[0]);
+}
+
+/** 族谱字框只允许 CJK 表意文字（含扩展区/兼容区）；字母、数字、标点、箭头等一律无效 */
+export function isCjkGlyph(ch: string): boolean {
+  return /^[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u{20000}-\u{323AF}\u3007\u3021-\u3029\u3038-\u303B]$/u.test(ch);
+}
+
+/** 清洗模型/本地输出：非 CJK（字母、数字、标点、箭头、符号）一律置空，绝不写入字框 */
+export function sanitizeCharOutput(
+  char: string | null,
+  note?: string,
+): { char: string | null; note: CharNote | undefined } {
+  if (char === null) return { char: null, note: note as CharNote | undefined };
+  const glyphs = [...char].filter(isCjkGlyph);
+  if (glyphs.length === 0) return { char: null, note: 'empty' };
+  if (glyphs.length === 1) return { char: glyphs[0], note: note as CharNote | undefined };
+  return { char: glyphs.slice(0, 2).join(''), note: 'multi' };
 }

@@ -23,6 +23,14 @@ export interface PreprocessOptions {
   useOpenCV?: boolean;
   /** 二值化后加粗笔画（PDF 矢量渲染 anti-alias 断点修复，1=3×3 膨胀） */
   strokeDilate?: number;
+  /** 小连通域剔除面积下限（PDF 宜更小以保留细页框） */
+  denoiseMinArea?: number;
+  /** 中值滤波半径，0=跳过（PDF 保留细框） */
+  medianRadius?: number;
+  /** 为 true 时在去噪前复制 layoutBinary（供版面检测，保留细页框） */
+  dualBinary?: boolean;
+  /** 分割二值图开运算半径（去椒盐噪点），0=跳过 */
+  morphOpenRadius?: number;
 }
 
 export interface PreprocessResult {
@@ -33,6 +41,8 @@ export interface PreprocessResult {
   pxPerMm: number;
   /** 二值矩阵（0/1，未打包，1=墨迹） */
   binary: Uint8Array;
+  /** 去噪前二值图（dualBinary 时供版面检测） */
+  layoutBinary?: Uint8Array;
 }
 
 /* ---------- Otsu ---------- */
@@ -155,6 +165,41 @@ export function dilateBinary(bin: Uint8Array, width: number, height: number, rad
     }
   }
   return out;
+}
+
+/** 形态学腐蚀：剔除孤立噪点（与 dilate 配对做开运算） */
+export function erodeBinary(bin: Uint8Array, width: number, height: number, radius = 1): Uint8Array {
+  if (radius <= 0) return bin;
+  const out = new Uint8Array(bin.length);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (!bin[y * width + x]) continue;
+      let keep = true;
+      outer:
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= height) {
+          keep = false;
+          break;
+        }
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= width || !bin[yy * width + xx]) {
+            keep = false;
+            break outer;
+          }
+        }
+      }
+      out[y * width + x] = keep ? 1 : 0;
+    }
+  }
+  return out;
+}
+
+/** 开运算：先腐蚀后膨胀，去除小噪点同时保留较粗笔画 */
+export function openBinary(bin: Uint8Array, width: number, height: number, radius = 1): Uint8Array {
+  if (radius <= 0) return bin;
+  return dilateBinary(erodeBinary(bin, width, height, radius), width, height, radius);
 }
 
 /** 小连通域剔除（F2.4 去噪第二步） */
@@ -292,10 +337,20 @@ export async function preprocessPipeline(
   }
   report('denoise', 70);
 
-  // 5. 去噪（F2.4）：中值滤波 + 小连通域剔除
-  binary = medianFilterBinary(binary, width, height, MEDIAN_RADIUS);
+  const layoutBinary = opts.dualBinary ? new Uint8Array(binary) : undefined;
+
+  // 5. 去噪（F2.4）：开运算 + 中值滤波 + 小连通域剔除（仅作用于分割用 binary）
+  const morphOpenRadius = opts.morphOpenRadius ?? 0;
+  if (morphOpenRadius > 0) {
+    binary = openBinary(binary, width, height, morphOpenRadius);
+  }
+  const medianRadius = opts.medianRadius ?? MEDIAN_RADIUS;
+  const denoiseMinArea = opts.denoiseMinArea ?? DENOISE_MIN_AREA;
+  if (medianRadius > 0) {
+    binary = medianFilterBinary(binary, width, height, medianRadius);
+  }
   report('denoise', 88);
-  binary = removeSmallComponents(binary, width, height, DENOISE_MIN_AREA);
+  binary = removeSmallComponents(binary, width, height, denoiseMinArea);
   report('denoise', 100);
 
   return {
@@ -304,5 +359,6 @@ export async function preprocessPipeline(
     deskewDeg,
     pxPerMm: targetDpi / 25.4,
     binary,
+    layoutBinary,
   };
 }

@@ -4,9 +4,9 @@
  */
 import * as Comlink from 'comlink';
 import { preprocessPipeline, type PreprocessOptions, type PreprocessResult } from '@/imaging/preprocess';
-import { detectRects, detectTreeLines } from '@/layout/detect';
+import { detectRects, detectTreeLines, type DetectOptions } from '@/layout/detect';
 import { analyzeTagRectInversions, detectArtifacts, detectNodes } from '@/layout/nodes';
-import { segmentChars } from '@/segment/segment';
+import { segmentChars, type SegmentOptions } from '@/segment/segment';
 import type {
   ArtifactStroke,
   BorderRect,
@@ -40,6 +40,8 @@ export interface PipelineAPI {
     width: number,
     height: number,
     onProgress: (p: ProgressInfo) => void,
+    options?: DetectOptions,
+    layoutBinary?: Uint8Array,
   ): Promise<LayoutResult>;
   segment(
     binary: Uint8Array,
@@ -48,6 +50,7 @@ export interface PipelineAPI {
     lines: TreeLine[],
     excludedRects?: Array<Pick<BorderRect | TagRect, 'x' | 'y' | 'w' | 'h'>>,
     borderRectsForMargin?: Array<Pick<BorderRect | TagRect, 'x' | 'y' | 'w' | 'h'>>,
+    options?: SegmentOptions,
   ): Promise<CharItem[]>;
 }
 
@@ -58,9 +61,10 @@ const api: PipelineAPI = {
     );
   },
 
-  async analyze(binary, width, height, onProgress) {
+  async analyze(binary, width, height, onProgress, options, layoutBinary) {
     onProgress({ stage: 'layout', percent: 10 });
-    const { borderRects, tagRects, rectMask } = detectRects(binary, width, height);
+    const layout = layoutBinary ?? binary;
+    const { borderRects, tagRects, rectMask } = detectRects(layout, width, height, options);
     onProgress({ stage: 'layout', percent: 35 });
     const treeLines = detectTreeLines(binary, width, height, rectMask);
     onProgress({ stage: 'layout', percent: 55 });
@@ -75,8 +79,8 @@ const api: PipelineAPI = {
     return { borderRects, tagRects, treeLines, treeNodes, artifacts };
   },
 
-  async segment(binary, width, height, lines, excludedRects = [], borderRectsForMargin = excludedRects) {
-    return segmentChars(binary, width, height, lines, excludedRects, borderRectsForMargin);
+  async segment(binary, width, height, lines, excludedRects = [], borderRectsForMargin = excludedRects, options) {
+    return segmentChars(binary, width, height, lines, excludedRects, borderRectsForMargin, options);
   },
 };
 

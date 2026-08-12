@@ -12,9 +12,19 @@ import {
   MIN_LINE_LEN,
 } from '@/lib/constants';
 import { connectedComponents } from '@/imaging/raster';
+import type { DetectProfile } from '@/imaging/sourceProfile';
+import { detectProfileFor } from '@/imaging/sourceProfile';
 import { isSolidGraphicBlock } from '@/layout/graphicBlock';
-import type { BorderRect, TagRect, TreeLine } from '@/model/types';
+import type { BorderRect, SourceKind, TagRect, TreeLine } from '@/model/types';
 import { uuid } from '@/lib/utils';
+
+export interface DetectOptions {
+  sourceKind?: SourceKind;
+}
+
+function resolveDetectProfile(options?: DetectOptions): DetectProfile {
+  return detectProfileFor(options?.sourceKind ?? 'image');
+}
 
 /**
  * 行程开运算：axis='h' 保留水平连续 ≥ len 的墨迹段；axis='v' 保留垂直段。
@@ -243,6 +253,7 @@ export function isPlausibleBorderBar(
   width: number,
   height: number,
   rect: Pick<BorderRect, 'x' | 'y' | 'w' | 'h'>,
+  profile: DetectProfile = detectProfileFor('image'),
 ): boolean {
   const shortSide = Math.min(rect.w, rect.h);
   const longSide = Math.max(rect.w, rect.h);
@@ -252,8 +263,8 @@ export function isPlausibleBorderBar(
   const span = barSpanCoverage(bin, width, height, rect);
   const nearEdge = isNearPageEdge(width, height, rect);
 
-  if (fill < 0.28) return false;
-  if (aspect >= 2.5 && span < 0.48) return false;
+  if (fill < profile.minBarFill) return false;
+  if (aspect >= 2.5 && span < profile.minBarSpan) return false;
 
   const pageArea = width * height;
   const area = rect.w * rect.h;
@@ -291,9 +302,10 @@ function appendBorderRectIfValid(
   bin: Uint8Array,
   width: number,
   height: number,
+  profile: DetectProfile,
   tolerance = { x: 8, y: 8, w: 16, h: 16 },
 ): boolean {
-  if (!isPlausibleBorderBar(bin, width, height, rect)) return false;
+  if (!isPlausibleBorderBar(bin, width, height, rect, profile)) return false;
   if (!isRenderableSolidBorderRect(rect, width, height)) return false;
   const before = rects.length;
   appendRectIfDistinct(rects, rect, tolerance);
@@ -316,9 +328,14 @@ function isFlushWithPageEdge(
 }
 
 /** 单轴开运算 + 页边位置约束，检出扫描件厚页框（横纵交集会漏掉短边 < 80px 的实心条） */
-function detectSolidFrameBars(bin: Uint8Array, width: number, height: number): BorderRect[] {
-  const vMinRun = Math.max(MIN_LINE_LEN, Math.round(height * 0.48));
-  const hMinRun = Math.max(MIN_LINE_LEN, Math.round(width * 0.48));
+function detectSolidFrameBars(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  profile: DetectProfile,
+): BorderRect[] {
+  const vMinRun = Math.max(MIN_LINE_LEN, Math.round(height * profile.solidFrameMinLongRatio));
+  const hMinRun = Math.max(MIN_LINE_LEN, Math.round(width * profile.solidFrameMinLongRatio));
   const edgePad = pageEdgePad(width, height);
   const maxThick = maxBorderBarThickness(width, height);
   const bars: BorderRect[] = [];
@@ -327,14 +344,14 @@ function detectSolidFrameBars(bin: Uint8Array, width: number, height: number): B
     const shortSide = orient === 'v' ? box.w : box.h;
     const longSide = orient === 'v' ? box.h : box.w;
     if (shortSide < 2 || shortSide > maxThick) return;
-    if (longSide < (orient === 'v' ? height : width) * 0.46) return;
+    if (longSide < (orient === 'v' ? height : width) * profile.solidFrameMinLongRatio) return;
     const nearEdge =
       orient === 'v'
         ? box.x < edgePad || box.x + box.w > width - edgePad
         : box.y < edgePad || box.y + box.h > height - edgePad;
     if (!nearEdge) return;
     const rect: BorderRect = { id: uuid(), x: box.x, y: box.y, w: box.w, h: box.h };
-    if (!isPlausibleBorderBar(bin, width, height, rect)) return;
+    if (!isPlausibleBorderBar(bin, width, height, rect, profile)) return;
     appendRectIfDistinct(bars, rect);
   };
 
@@ -356,9 +373,10 @@ function extractBarFromStripProfile(
   start: number,
   end: number,
   anchor: 'min' | 'max',
+  minSpanRatio = 0.52,
 ): BorderRect | null {
   const maxThick = maxBorderBarThickness(width, height);
-  const minSpan = axis === 'v' ? height * 0.52 : width * 0.52;
+  const minSpan = axis === 'v' ? height * minSpanRatio : width * minSpanRatio;
 
   type SliceStat = { i: number; spanLen: number; fill: number; inkMin: number; inkMax: number };
   const slices: SliceStat[] = [];
@@ -432,14 +450,19 @@ function extractBarFromStripProfile(
 }
 
 /** 扫描页边窄带，提取 PDF 细页框与内缩厚页框 */
-function detectPageOutlineBars(bin: Uint8Array, width: number, height: number): BorderRect[] {
+function detectPageOutlineBars(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  profile: DetectProfile,
+): BorderRect[] {
   const strip = Math.max(24, Math.round(Math.min(width, height) * 0.12));
   const bars: BorderRect[] = [];
 
   const tryBar = (bar: BorderRect | null) => {
     if (!bar) return;
     if (!isFlushWithPageEdge(width, height, bar)) return;
-    if (!isPlausibleBorderBar(bin, width, height, bar)) return;
+    if (!isPlausibleBorderBar(bin, width, height, bar, profile)) return;
     appendRectIfDistinct(bars, { ...bar, id: uuid() });
   };
 
@@ -450,11 +473,54 @@ function detectPageOutlineBars(bin: Uint8Array, width: number, height: number): 
   return bars;
 }
 
+/** PDF 内缩页框：不要求贴画布边缘，在页边 25% 带及 4%–28% 内缩带内搜四条长条 */
+function detectPdfInsetFrameBars(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  profile: DetectProfile,
+): BorderRect[] {
+  const minSide = Math.min(width, height);
+  const outerStrip = Math.max(32, Math.round(minSide * 0.25));
+  const innerLo = Math.max(8, Math.round(minSide * 0.04));
+  const innerHi = Math.round(minSide * 0.28);
+  const minSpanRatio = Math.max(0.34, profile.minBarSpan);
+  const bars: BorderRect[] = [];
+
+  const tryBar = (bar: BorderRect | null) => {
+    if (!bar) return;
+    if (!isPlausibleBorderBar(bin, width, height, bar, profile)) return;
+    appendRectIfDistinct(bars, { ...bar, id: uuid() });
+  };
+
+  const scan = (axis: 'h' | 'v', start: number, end: number, anchor: 'min' | 'max') => {
+    tryBar(extractBarFromStripProfile(bin, width, height, axis, start, end, anchor, minSpanRatio));
+  };
+
+  scan('h', 0, outerStrip, 'min');
+  scan('h', height - outerStrip, height, 'max');
+  scan('v', 0, outerStrip, 'min');
+  scan('v', width - outerStrip, width, 'max');
+  if (innerHi > innerLo) {
+    scan('h', innerLo, innerHi, 'min');
+    scan('h', height - innerHi, height - innerLo, 'max');
+    scan('v', innerLo, innerHi, 'min');
+    scan('v', width - innerHi, width - innerLo, 'max');
+  }
+  return bars;
+}
+
 /**
  * 检测外框实心黑条与装饰块（F3.1/F3.5 第一步）。
  * 粗核开运算（横 80 / 纵 80）取交集区域 → 连通域 → 按长宽比与填充率分类。
  */
-export function detectRects(bin: Uint8Array, width: number, height: number): RectDetectResult {
+export function detectRects(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  options?: DetectOptions,
+): RectDetectResult {
+  const profile = resolveDetectProfile(options);
   const openH = openingByRunLength(bin, width, height, 'h', KERNEL_H_LEN);
   const openV = openingByRunLength(bin, width, height, 'v', KERNEL_V_LEN);
   // 只有同时通过横向和纵向开运算的像素才是实心结构。
@@ -475,11 +541,18 @@ export function detectRects(bin: Uint8Array, width: number, height: number): Rec
     }
   };
 
-  addBars(detectSolidFrameBars(bin, width, height));
-  addBars(detectPageOutlineBars(bin, width, height));
+  addBars(detectSolidFrameBars(bin, width, height, profile));
+  if (options?.sourceKind === 'pdf') {
+    addBars(detectPdfInsetFrameBars(bin, width, height, profile));
+  } else {
+    addBars(detectPageOutlineBars(bin, width, height, profile));
+  }
 
-  const edgeMargin = (axis: 'h' | 'v') =>
-    axis === 'h' ? Math.max(16, Math.round(height * 0.1)) : Math.max(16, Math.round(width * 0.1));
+  const edgeMargin = (axis: 'h' | 'v') => {
+    const base = axis === 'h' ? height : width;
+    const ratio = options?.sourceKind === 'pdf' ? 0.32 : 0.1;
+    return Math.max(16, Math.round(base * ratio));
+  };
   const isEdgeBand = (axis: 'h' | 'v', band: { start: number; end: number }) => {
     const margin = edgeMargin(axis);
     const span = axis === 'h' ? height : width;
@@ -487,7 +560,7 @@ export function detectRects(bin: Uint8Array, width: number, height: number): Rec
   };
   const minBandThickness = (atEdge: boolean) =>
     atEdge
-      ? Math.max(2, Math.round(Math.min(width, height) * 0.0008))
+      ? Math.max(2, Math.round(Math.min(width, height) * profile.minSolidThicknessScale))
       : Math.max(8, Math.round(Math.min(width, height) * 0.004));
 
   const addProjectionBorder = (axis: 'h' | 'v', band: { start: number; end: number }) => {
@@ -509,21 +582,19 @@ export function detectRects(bin: Uint8Array, width: number, height: number): Rec
     }
     if (maxX <= minX || maxY <= minY) return;
     const rect = { id: uuid(), x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
-    if (appendBorderRectIfValid(borderRects, rect, bin, width, height)) {
+    if (appendBorderRectIfValid(borderRects, rect, bin, width, height, profile)) {
       markRectMask(rectMask, width, height, rect);
     }
   };
-  // 投影补漏：页边高覆盖带（阈值略低以兼容厚框内缘）
-  for (const band of projectionBands(bin, width, height, 'h', 0.72)) addProjectionBorder('h', band);
-  for (const band of projectionBands(bin, width, height, 'v', 0.72)) addProjectionBorder('v', band);
+  for (const band of projectionBands(bin, width, height, 'h', profile.projectionCoverage)) addProjectionBorder('h', band);
+  for (const band of projectionBands(bin, width, height, 'v', profile.projectionCoverage)) addProjectionBorder('v', band);
   for (const b of boxes) {
     const longSide = Math.max(b.w, b.h);
     const shortSide = Math.min(b.w, b.h);
     const aspect = longSide / Math.max(1, shortSide);
     const fillRatio = b.area / (b.w * b.h);
-    const minSolidThickness = Math.max(8, Math.round(Math.min(width, height) * 0.004));
-    // 长宽比只说明“像线”，不能说明“是实心边条”。厚度门槛专门排除谱系细线。
-    const isBorder = aspect >= 5 && longSide >= 150 && shortSide >= minSolidThickness && fillRatio >= 0.55;
+    const minSolidThickness = Math.max(8, Math.round(Math.min(width, height) * profile.minSolidThicknessScale));
+    const isBorder = aspect >= 5 && longSide >= 150 && shortSide >= minSolidThickness && fillRatio >= profile.minBorderFillRatio;
     const entry = { id: uuid(), x: b.x, y: b.y, w: b.w, h: b.h };
     const isTag =
       !isBorder &&
@@ -533,7 +604,7 @@ export function detectRects(bin: Uint8Array, width: number, height: number): Rec
       b.area >= 1200 &&
       isSolidGraphicBlock(bin, width, height, entry);
     if (!isBorder && !isTag) continue;
-    if (isBorder) appendBorderRectIfValid(borderRects, entry, bin, width, height);
+    if (isBorder) appendBorderRectIfValid(borderRects, entry, bin, width, height, profile);
     else tagRects.push(entry);
     // 掩码标记
     for (let i = 0; i < labels.length; i++) {

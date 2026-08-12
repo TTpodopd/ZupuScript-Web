@@ -37,7 +37,12 @@ import { openaiProvider } from './providers/openai';
 import { anthropicProvider } from './providers/anthropic';
 import { customProvider } from './providers/custom';
 import { deepseekProvider } from './providers/deepseek';
-import { applyGlyphVerification, type GlyphVerifyInput } from './glyphVerify';
+import type { GlyphVerifyInput } from './glyphVerify';
+import { inkMetricsInBbox } from '@/imaging/ink';
+import { canonicalizeAnchoredPageItems, normalizeAnchoredPageItems } from './anchorMatch';
+import { resolveFixedBookTitle, getFixedTitleDebug } from './fixedTitle';
+import { applyLeftMarginPageNumbers } from '@/layout/marginRegions';
+import { applyRecognitionPatch, fillFromAnchoredItems } from './fillPipeline';
 
 const PROVIDERS: Record<Exclude<ProviderId, 'local'>, LLMProvider> = {
   gemini: geminiProvider,
@@ -154,48 +159,31 @@ async function downgradeBatch(
   }
 }
 
-/** 锚点整页结果按 id 写入 patch，返回成功写入数量 */
-function applyAnchoredPageItems(
-  items: RecognizedPageItem[],
+function mergePageReviewedItems(
+  first: RecognizedPageItem[],
+  reviewed: RecognizedItem[],
   chars: CharItem[],
-  skipIds: Set<string>,
-  patch: Map<string, Partial<CharItem>>,
-  glyphDrafts: Map<string, GlyphVerifyInput>,
-): number {
-  const processed = postprocessItems(items, { isGenealogy: true }) as RecognizedPageItem[];
-  const byId = new Map(processed.map((it) => [it.id, it]));
-  let applied = 0;
-  for (let i = 0; i < chars.length; i += 1) {
-    const c = chars[i];
-    if (skipIds.has(c.id)) continue;
-    const item = byId.get(i);
-    if (!item?.char || item.confidence < 0.5) continue;
-    if (!isValidChar(item.char, item.note)) continue;
-    patch.set(c.id, {
-      text: item.char,
-      conf: item.confidence,
-      note: item.note ?? 'ok',
-      source: 'llm',
-    });
-    glyphDrafts.set(c.id, {
-      primary: item.char,
-      modelConfidence: item.confidence,
-      candidates: item.candidates,
-      routeVotes: 1,
-    });
-    applied += 1;
-  }
-  return applied;
-}
-
-function mergePageReviewedItems(first: RecognizedPageItem[], reviewed: RecognizedItem[]): RecognizedPageItem[] {
+  widthPx: number,
+  heightPx: number,
+): RecognizedPageItem[] {
   const merged = mergeReviewedItems(first, reviewed);
-  const coords = new Map(first.map((it) => [it.id, { rx: it.rx, ry: it.ry }]));
-  return merged.map((it) => ({
-    ...it,
-    rx: coords.get(it.id)?.rx ?? 0,
-    ry: coords.get(it.id)?.ry ?? 0,
-  }));
+  return merged.map((it) => {
+    const idx = it.id;
+    if (idx < 0 || idx >= chars.length) {
+      const fallback = first.find((f) => f.id === it.id);
+      return {
+        ...it,
+        rx: fallback?.rx ?? 0,
+        ry: fallback?.ry ?? 0,
+      };
+    }
+    const anchor = chars[idx];
+    return {
+      ...it,
+      rx: Math.round((anchor.cx / widthPx) * 10000) / 10000,
+      ry: Math.round((anchor.cy / heightPx) * 10000) / 10000,
+    };
+  });
 }
 
 /** B 模式拼图批处理（模式 C 漏字时复用） */
@@ -234,7 +222,8 @@ async function runGridBatchesForChars(
     });
     const cols = Math.min(GRID_COLS, slice.length);
     const rows = Math.ceil(slice.length / Math.max(1, cols));
-    const initialPrompt = buildGridUserPrompt(cols, rows, slice.length, localDraft);
+    const pageNumberIds = batch.ids.map((sliceIndex, id) => (slice[sliceIndex]?.group === 'pageno' ? id : -1)).filter((id) => id >= 0);
+    const initialPrompt = buildGridUserPrompt(cols, rows, slice.length, localDraft, pageNumberIds);
     const cacheKey = [
       RECOGNITION_PROMPT_VERSION,
       cfg.provider,
@@ -295,17 +284,19 @@ async function runGridBatchesForChars(
         const valid = isValidChar(item.char, item.note);
         const initial = initialById.get(item.id);
         patch.set(char.id, {
-          text: valid ? item.char : item.char,
-          conf: valid ? item.confidence : Math.min(item.confidence, CONFIDENCE_THRESHOLD - 0.01),
-          note: valid ? item.note ?? 'ok' : 'multi',
+          text: valid ? item.char : null,
+          conf: valid ? item.confidence : 0,
+          note: valid ? item.note ?? 'ok' : 'empty',
           source: 'llm',
         });
-        glyphDrafts.set(char.id, {
-          primary: item.char,
-          modelConfidence: item.confidence,
-          candidates: item.candidates,
-          routeVotes: initial && initial.char === item.char ? 2 : 1,
-        });
+        if (valid) {
+          glyphDrafts.set(char.id, {
+            primary: item.char,
+            modelConfidence: item.confidence,
+            candidates: item.candidates,
+            routeVotes: initial && initial.char === item.char ? 2 : 1,
+          });
+        }
       }
     }
     done += 1;
@@ -338,6 +329,22 @@ export async function recognizePage(
   const totalChars = page.chars.length;
   const patch = new Map<string, Partial<CharItem>>();
   const glyphDrafts = new Map<string, GlyphVerifyInput>();
+  // 临时固定识别：左侧书名栏固定为「倪氏宗譜」，直接写结果并跳过模型；
+  // 书名栏的断裂碎片/多余框标记 consumed，不再送识别并在结果中删除
+  const fixed = resolveFixedBookTitle(page.chars, width);
+  const fixedTitle = fixed.assignments;
+  const fixedSkip = fixed.consumedIds;
+  console.info('[fixedTitle]', getFixedTitleDebug());
+  for (const [id, text] of fixedTitle) {
+    patch.set(id, { text, conf: 0.99, note: 'ok', source: 'manual' });
+  }
+  // 已由分析阶段区域算法确定的页码同样锁定，避免识别阶段覆盖。
+  const protectedPageNumbers = page.chars.filter((c) => c.group === 'pageno' && c.edited && Boolean(c.text));
+  const protectedPageNumberIds = new Set(protectedPageNumbers.map((c) => c.id));
+  for (const c of protectedPageNumbers) {
+    patch.set(c.id, { text: c.text, conf: Math.max(c.conf, 0.99), note: 'ok', source: 'manual' });
+  }
+  const protectedSkip = new Set([...fixedSkip, ...protectedPageNumberIds]);
   const segmentNotes = new Map(
     page.chars
       .filter((c) => c.note === 'split' || c.note === 'merge' || c.note === 'spacing')
@@ -364,9 +371,9 @@ export async function recognizePage(
     const remembered = await recallCharacters(page.chars, bin, width, height).catch(() => new Map());
     for (const char of page.chars) {
       const memory = remembered.get(char.id);
-      if (memory) patch.set(char.id, { text: memory.text, conf: memory.confidence, note: 'ok', source: 'local' });
+      if (memory && !protectedSkip.has(char.id)) patch.set(char.id, { text: memory.text, conf: memory.confidence, note: 'ok', source: 'local' });
     }
-    const unresolved = page.chars.filter((char) => !remembered.has(char.id));
+    const unresolved = page.chars.filter((char) => !remembered.has(char.id) && !protectedSkip.has(char.id));
     batchCount = Math.max(1, Math.ceil(unresolved.length / 12));
     report(0, `本地识别记忆命中 ${remembered.size} 字，继续深度识别 ${unresolved.length} 字`);
     const results = await localOcrChars(unresolved, bin, width, height, (doneChars, total) => {
@@ -394,9 +401,9 @@ export async function recognizePage(
     const remembered = await recallCharacters(page.chars, bin, width, height).catch(() => new Map());
     for (const char of page.chars) {
       const memory = remembered.get(char.id);
-      if (memory) patch.set(char.id, { text: memory.text, conf: memory.confidence, note: 'ok', source: 'local' });
+      if (memory && !protectedSkip.has(char.id)) patch.set(char.id, { text: memory.text, conf: memory.confidence, note: 'ok', source: 'local' });
     }
-    const unresolved = page.chars.filter((char) => !remembered.has(char.id));
+    const unresolved = page.chars.filter((char) => !remembered.has(char.id) && !protectedSkip.has(char.id));
     batchCount = Math.max(1, Math.ceil(unresolved.length / GRID_BATCH_SIZE));
     report(0, `识别记忆命中 ${remembered.size} 字；其余 ${unresolved.length} 字分 ${batchCount} 批进行模型校验`);
     const grid = await runGridBatchesForChars(
@@ -431,11 +438,12 @@ export async function recognizePage(
     const rememberedIds = new Set<string>();
     for (const char of page.chars) {
       const memory = remembered.get(char.id);
-      if (memory) {
+      if (memory && !protectedSkip.has(char.id)) {
         rememberedIds.add(char.id);
         patch.set(char.id, { text: memory.text, conf: memory.confidence, note: 'ok', source: 'local' });
       }
     }
+    for (const id of protectedSkip) rememberedIds.add(id);
     const needCloud = page.chars.filter((c) => !rememberedIds.has(c.id));
     const gridSliceCount = Math.max(0, Math.ceil(needCloud.length / GRID_BATCH_SIZE));
     batchCount = 10 + Math.max(1, gridSliceCount);
@@ -445,7 +453,13 @@ export async function recognizePage(
       try {
         report(0, '正在编码整页图像…');
         const pageImageBase64 = await pageBinaryToPngBase64Downscaled(bin, width, height, PAGE_RECOGNITION_MAX_EDGE);
-        const anchorPrompt = buildPageAnchoredUserPrompt(page.chars, width, height);
+        // 无墨迹字框（分割噪声/空位）不作为锚点发给模型，避免模型对空白处编字
+        const anchorChars = page.chars.map((c) => {
+          const metrics = inkMetricsInBbox(bin, width, height, c.bbox);
+          const hasInk = Boolean(metrics && metrics.inkArea >= 6 && metrics.fillRatio >= 0.04);
+          return { ...c, skipAnchor: !hasInk || rememberedIds.has(c.id) };
+        });
+        const anchorPrompt = buildPageAnchoredUserPrompt(anchorChars, width, height);
         report(1, '正在调用云端 API 整页识别（1/2）…');
         const { signal, cancel } = withTimeout(cfg.timeoutMs * 2);
         const result = await provider.recognizePageImage({ mode: 'C', pageImageBase64, promptOverride: anchorPrompt, signal }, cfg);
@@ -457,10 +471,15 @@ export async function recognizePage(
           usageTotal.completionTokens += result.usage.completionTokens;
         }
         report(6, '整页初次识别完成，正在进行模型输出文档综合校验（2/2）…');
-        let mergedItems = result.items;
+        let mergedItems = canonicalizeAnchoredPageItems(result.items, page.chars.length);
         const reviewTimeout = withTimeout(cfg.timeoutMs * 2);
         try {
-          const reviewPrompt = buildPageAnchoredReviewPrompt(JSON.stringify({ items: result.items }), page.chars.length);
+          const reviewPrompt = buildPageAnchoredReviewPrompt(
+            JSON.stringify({ items: mergedItems }),
+            anchorChars,
+            width,
+            height,
+          );
           const second = await provider.recognizePageImage({
             mode: 'C',
             pageImageBase64,
@@ -470,7 +489,8 @@ export async function recognizePage(
           reviewTimeout.cancel();
           if (second.items.length > 0) {
             bumpSessionUploads(1);
-            mergedItems = mergePageReviewedItems(result.items, second.items);
+            mergedItems = mergePageReviewedItems(mergedItems, second.items, page.chars, width, height);
+            mergedItems = canonicalizeAnchoredPageItems(mergedItems, page.chars.length);
             costCny += provider.estimateCost(totalChars) * 3;
             if (second.usage) {
               usageTotal.promptTokens += second.usage.promptTokens;
@@ -482,7 +502,9 @@ export async function recognizePage(
           console.warn('[orchestrator] 整页模型综合校验失败，保留初次结果：', err);
         }
         report(8, '整页识别完成，正在写入字位结果…');
-        pageApplied = applyAnchoredPageItems(mergedItems, page.chars, rememberedIds, patch, glyphDrafts);
+        mergedItems = canonicalizeAnchoredPageItems(mergedItems, page.chars.length);
+        mergedItems = normalizeAnchoredPageItems(mergedItems, page.chars, width, height);
+        pageApplied = fillFromAnchoredItems(mergedItems, page.chars, rememberedIds, patch, glyphDrafts, width, height);
         report(9, `整页锚点识别写入 ${pageApplied}/${needCloud.length} 字`);
       } catch (err) {
         console.warn('[orchestrator] 整页锚点识别失败，将改用拼图补识别：', err);
@@ -525,13 +547,18 @@ export async function recognizePage(
     }).catch(() => undefined);
   }
 
-  let chars = page.chars.map((c) => {
-    const p = patch.get(c.id);
-    return p ? { ...c, ...p } : c;
-  });
+  let chars = applyRecognitionPatch(page.chars, patch, glyphDrafts, bin, width, height);
 
-  if (glyphDrafts.size > 0 && typeof document !== 'undefined') {
-    chars = applyGlyphVerification(chars, bin, width, height, glyphDrafts);
+  // 固定书名字标记为已确认；书名栏多余碎片框直接删除
+  if (protectedSkip.size > 0) {
+    chars = chars
+      .filter((c) => {
+        if (fixedTitle.has(c.id)) return true;
+        if (fixedSkip.has(c.id)) return false;
+        const r = fixed.titleRegion;
+        return !r || c.cx < r[0] || c.cx > r[2] || c.cy < r[1] || c.cy > r[3];
+      })
+      .map((c) => (fixedTitle.has(c.id) ? { ...c, edited: true } : c));
   }
 
   chars = chars.map((c) => {

@@ -7,6 +7,7 @@ import { scaleCoverage } from '@/segment/grid';
 import { PREVIEW_FONT_FAMILY } from '@/verify/preview';
 import type { CharItem, CharNote } from '@/model/types';
 import { CONFIDENCE_THRESHOLD } from '@/lib/constants';
+import { isCjkGlyph } from './prompt';
 
 export const GLYPH_NORMALIZE_SIZE = 64;
 
@@ -210,6 +211,7 @@ export function expandGlyphCandidates(primary: string | null, extras: string[] =
   const out: string[] = [];
   const add = (value: string | null | undefined) => {
     if (!value || [...value].length !== 1) return;
+    if (!isCjkGlyph(value)) return; // 字母/符号不参与字形回验
     if (!out.includes(value)) out.push(value);
   };
   add(primary);

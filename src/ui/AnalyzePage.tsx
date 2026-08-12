@@ -12,18 +12,21 @@ import { mergeLayoutWithGuide, finalizeTagRects } from '@/layout/applyGuide';
 import { filterSolidGraphicRects } from '@/layout/graphicBlock';
 import { detectTreeLines } from '@/layout/detect';
 import { detectArtifacts, detectNodes } from '@/layout/nodes';
+import { detectLeftMarginGraphics, rebuildLeftMarginTextRegions, removeCharsInsideMarginGraphics, removeGeometryInsideMarginGraphics, removeGeometryLeftOfFrame, removeNodesInsideMarginGraphics, removeNodesLeftOfFrame } from '@/layout/marginRegions';
 import { pagesForBatchProcessing, batchProcessingSignature, inferPageRecognitionSettingsKey } from '@/lib/utils';
-import { PDF_STROKE_DILATE_RADIUS } from '@/lib/constants';
+import { preprocessProfileFor, resolveSourceKind } from '@/imaging/sourceProfile';
 import type { BorderLayoutGuide, Page } from '@/model/types';
 import { getBinaryImage, getPageImageData, putBinaryImage } from '@/storage/opfs';
 import { useProjectStore } from '@/store/projectStore';
 import { useSettingsStore } from '@/store/settingsStore';
 import type { PipelineAPI, ProgressInfo } from '@/workers/pipeline.worker';
 import { recognizePage } from '@/recognize/orchestrator';
+import { resolveFixedBookTitle } from '@/recognize/fixedTitle';
 import { buildProviderConfig, currentRecognitionSettingsKey, describeActiveModel, isLocalRecognitionMode, resolveRecognitionMode } from '@/recognize/buildConfig';
 import { analyzeBorderLayoutVision, canUseVisionLayout, formatVisionFallbackMessage } from '@/recognize/layoutVision';
 import type { RecognizeProgress } from '@/recognize/types';
 import { grantConsent, hasConsented } from '@/privacy/consent';
+import { validateAndRefineCharPositions } from '@/verify/alignment';
 
 function createPipeline(): { worker: Worker; api: Comlink.Remote<PipelineAPI> } {
   const worker = new Worker(new URL('../workers/pipeline.worker.ts', import.meta.url), { type: 'module' });
@@ -117,7 +120,9 @@ export default function AnalyzePage() {
   useEffect(() => () => pipelineRef.current?.worker.terminate(), []);
 
   /** ① 预处理：原图 → 去斜/二值化/去噪/DPI 归一 → binary 存 OPFS + calibration 锁定 */
-  const runPreprocess = async (target: Page): Promise<Uint8Array | null> => {
+  const runPreprocess = async (
+    target: Page,
+  ): Promise<{ binary: Uint8Array; layoutBinary?: Uint8Array } | null> => {
     setProgress({ stage: 'deskew', percent: 0 });
     setMessage('高清预处理：去斜、二值化、去噪…');
     const image = await getPageImageData(target.imageKey);
@@ -126,16 +131,20 @@ export default function AnalyzePage() {
       return null;
     }
     const { api } = getPipeline();
-    const isPdfSource = target.source.dpi > 0;
+    const sourceKind = resolveSourceKind(target.source);
+    const prep = preprocessProfileFor(sourceKind, target.source);
     const result = await api.preprocess(
       image,
       {
-        targetDpi: isPdfSource ? target.source.dpi : 254,
-        sourceDpi: isPdfSource ? target.source.dpi : undefined,
-        binarizer: 'sauvola',
-        // 禁用 Worker 内 OpenCV 懒加载：10MB WASM 在部分静态托管/CDN 环境会永久挂起（进度卡在 ~11%）
+        targetDpi: prep.targetDpi,
+        sourceDpi: prep.sourceDpi,
+        binarizer: prep.binarizer,
         useOpenCV: false,
-        strokeDilate: isPdfSource ? PDF_STROKE_DILATE_RADIUS : 0,
+        strokeDilate: prep.strokeDilate,
+        denoiseMinArea: prep.denoiseMinArea,
+        medianRadius: prep.medianRadius,
+        dualBinary: prep.dualBinary,
+        morphOpenRadius: prep.morphOpenRadius,
       },
       Comlink.proxy((p: ProgressInfo) => setProgress(p)),
     );
@@ -151,11 +160,18 @@ export default function AnalyzePage() {
       },
       source: { ...target.source, widthPx: result.width, heightPx: result.height },
     });
-    return result.binary as Uint8Array;
+    return {
+      binary: result.binary as Uint8Array,
+      layoutBinary: result.layoutBinary as Uint8Array | undefined,
+    };
   };
 
   /** ② 版面分析 + 字符分割 + 自动标定（可选：视觉模型先出边框规则再合并） */
-  const runAnalyze = async (target: Page, binary?: Uint8Array): Promise<void> => {
+  const runAnalyze = async (
+    target: Page,
+    binary?: Uint8Array,
+    layoutBinary?: Uint8Array,
+  ): Promise<void> => {
     let bin = binary;
     let w = target.source.widthPx;
     let h = target.source.heightPx;
@@ -175,8 +191,16 @@ export default function AnalyzePage() {
 
     // ① 本地 CV 版面分析（始终执行，不依赖云端）
     setProgress({ stage: 'layout', percent: 5 });
-    setMessage('本地版面分析：外框、谱系线、节点…');
-    const localLayout = await api.analyze(bin as Uint8Array, w, h, Comlink.proxy((p: ProgressInfo) => setProgress(p)));
+    const sourceKind = resolveSourceKind(target.source);
+    setMessage(sourceKind === 'pdf' ? 'PDF 版面分析：外框、谱系线、节点…' : '本地版面分析：外框、谱系线、节点…');
+    const localLayout = await api.analyze(
+      bin as Uint8Array,
+      w,
+      h,
+      Comlink.proxy((p: ProgressInfo) => setProgress(p)),
+      { sourceKind },
+      layoutBinary as Uint8Array | undefined,
+    );
 
     let borderRects = localLayout.borderRects;
     let tagRects = localLayout.tagRects;
@@ -232,10 +256,23 @@ export default function AnalyzePage() {
       artifacts = detectArtifacts(bin as Uint8Array, w, h, treeLines);
     }
 
-    // ④ 装饰块与文字分流：剔除误分为黑块的文字区
+    // ④ 左页边区域专用优化：检出书签/卷标图块，仅过滤该区域内假线、假节点，不触碰正文。
     tagRects = filterSolidGraphicRects(tagRects, bin as Uint8Array, w, h);
-    const probeChars = await api.segment(bin as Uint8Array, w, h, treeLines, borderRects);
-    tagRects = finalizeTagRects(tagRects, probeChars, bin as Uint8Array, w, h);
+    const marginGraphics = detectLeftMarginGraphics(bin as Uint8Array, w, h, borderRects);
+    for (const graphic of marginGraphics) {
+      if (!tagRects.some((r) => Math.abs(r.x - graphic.x) < 8 && Math.abs(r.y - graphic.y) < 8)) tagRects.push(graphic);
+    }
+    treeLines = removeGeometryLeftOfFrame(removeGeometryInsideMarginGraphics(treeLines, marginGraphics), w, h, borderRects);
+    treeNodes = removeNodesLeftOfFrame(removeNodesInsideMarginGraphics(treeNodes, marginGraphics), w, h, borderRects);
+    artifacts = removeGeometryLeftOfFrame(removeGeometryInsideMarginGraphics(artifacts, marginGraphics), w, h, borderRects);
+    const segmentOpts = { sourceKind };
+    const probeChars = await api.segment(bin as Uint8Array, w, h, treeLines, borderRects, borderRects, segmentOpts);
+    const finalizedTags = finalizeTagRects(tagRects, probeChars, bin as Uint8Array, w, h);
+    // 左页边书签是区域算法确定的结果，不能被正文探测阶段再次过滤。
+    for (const graphic of marginGraphics) {
+      if (!finalizedTags.some((r) => Math.abs(r.x - graphic.x) < 8 && Math.abs(r.y - graphic.y) < 8)) finalizedTags.push(graphic);
+    }
+    tagRects = finalizedTags;
 
     setProgress({ stage: 'segment', percent: 50 });
     const segmented = await api.segment(
@@ -245,10 +282,41 @@ export default function AnalyzePage() {
       treeLines,
       [...borderRects, ...tagRects],
       borderRects,
+      segmentOpts,
     );
     const structured = applyColumnStructure(segmented);
+    const { chars: alignedRaw, stats: alignStats } = validateAndRefineCharPositions(
+      structured,
+      bin as Uint8Array,
+      w,
+      h,
+    );
+    // 左页边图块内不保留字符框；左下页码单独按横笔结构重建并固定识别。
+    const aligned = rebuildLeftMarginTextRegions(
+      removeCharsInsideMarginGraphics(alignedRaw, marginGraphics),
+      bin as Uint8Array,
+      w,
+      h,
+      borderRects,
+    );
+    // 临时固定识别：左侧书名栏直接填「倪氏宗譜」，不依赖模型；多余碎片框删除
+    const fixed = resolveFixedBookTitle(aligned, w);
+    const fixedTitle = fixed.assignments;
+    const fixedSkip = fixed.consumedIds;
+    const withTitle = fixedTitle.size > 0
+      ? aligned
+        .filter((c) => {
+          if (fixedTitle.has(c.id)) return true;
+          if (fixedSkip.has(c.id)) return false;
+          const r = fixed.titleRegion;
+          return !r || c.cx < r[0] || c.cx > r[2] || c.cy < r[1] || c.cy > r[3];
+        })
+        .map((c) => (fixedTitle.has(c.id)
+          ? { ...c, text: fixedTitle.get(c.id) ?? null, conf: 0.99, note: 'ok' as const, source: 'manual' as const, edited: true }
+          : c))
+      : aligned;
     const calibrated = calibratePage(
-      { ...target, chars: structured, calibration: { ...target.calibration, pxPerMm: target.calibration.pxPerMm } },
+      { ...target, chars: withTitle, calibration: { ...target.calibration, pxPerMm: target.calibration.pxPerMm } },
       undefined,
       { data: bin as Uint8Array, width: w, height: h },
     );
@@ -265,7 +333,7 @@ export default function AnalyzePage() {
     });
     setProgress({ stage: 'segment', percent: 100 });
     setMessage(
-      `分析完成：外框 ${borderRects.length}${borderLayoutGuide ? '（含视觉规则）' : ''}，连线 ${treeLines.length}，节点 ${treeNodes.length}，字符 ${structured.length}`,
+      `分析完成：外框 ${borderRects.length}${borderLayoutGuide ? '（含视觉规则）' : ''}，连线 ${treeLines.length}，节点 ${treeNodes.length}，字符 ${aligned.length}（原图对齐 ${alignStats.aligned}/${alignStats.total}，平均偏移 ${alignStats.avgOffsetPx.toFixed(1)}px）${fixedTitle.size > 0 ? `；书名固定识别 ${fixedTitle.size} 字` : ''}`,
     );
   };
 
@@ -387,17 +455,22 @@ export default function AnalyzePage() {
         });
 
         let bin: Uint8Array | null = null;
+        let layoutBin: Uint8Array | undefined;
         if (needsPreprocess) {
           if (localMode) setMessage(`本地模式 · 预处理第 ${pageIdx + 1}/${pendingPages.length} 页…`);
-          bin = await runPreprocess(analyzed);
-          if (!bin) throw new Error('找不到原图，请返回导入页重新上传');
+          const prepResult = await runPreprocess(analyzed);
+          if (!prepResult) throw new Error('找不到原图，请返回导入页重新上传');
+          bin = prepResult.binary;
+          layoutBin = prepResult.layoutBinary;
           analyzed = useProjectStore.getState().pages.find((x) => x.id === p.id)!;
         } else if (needsAnalyze) {
           const stored = await getBinaryImage(analyzed.binaryKey);
           if (stored) bin = stored.bin;
           else {
-            bin = await runPreprocess(analyzed);
-            if (!bin) throw new Error('找不到原图，请返回导入页重新上传');
+            const prepResult = await runPreprocess(analyzed);
+            if (!prepResult) throw new Error('找不到原图，请返回导入页重新上传');
+            bin = prepResult.binary;
+            layoutBin = prepResult.layoutBinary;
           }
           analyzed = useProjectStore.getState().pages.find((x) => x.id === p.id)!;
         }
@@ -408,7 +481,7 @@ export default function AnalyzePage() {
             if (!stored) throw new Error('找不到预处理结果，请重新运行预处理');
             bin = stored.bin;
           }
-          await runAnalyze(analyzed, bin);
+          await runAnalyze(analyzed, bin, layoutBin);
           analyzed = useProjectStore.getState().pages.find((x) => x.id === p.id)!;
         }
 

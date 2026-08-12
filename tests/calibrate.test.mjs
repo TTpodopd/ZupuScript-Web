@@ -87,4 +87,16 @@ const single = calibratePage({ ...page, chars: [mkChar(40)] });
 check('单组时 title/pageno/rank 兜底 = body', single.fontSizes.title === single.fontSizes.body
   && single.fontSizes.pageno === single.fontSizes.body && single.fontSizes.rank === single.fontSizes.body);
 
+
+section('page number box-height calibration');
+const pageNoPage = makeSamplePage();
+pageNoPage.chars = [
+  ...Array.from({ length: 6 }, (_, i) => ({ ...mkChar(40), id: `body-${i}`, group: 'body' })),
+  { ...mkChar(2, 'side'), id: 'page-one', bbox: [0, 0, 40, 40], group: 'pageno', text: '一' },
+  { ...mkChar(6, 'side'), id: 'page-two', bbox: [0, 50, 40, 90], group: 'pageno', text: '二' },
+];
+const pageNoResult = calibratePage(pageNoPage, undefined, { data: new Uint8Array(200 * 200), width: 200, height: 200 });
+eq('page number pt equals body pt', pageNoResult.fontSizes.pageno, pageNoResult.fontSizes.body);
+check('page number chars use body pt', pageNoResult.chars.filter((c) => c.group === 'pageno').every((c) => c.pt === pageNoResult.fontSizes.body));
+check('body pt unchanged by page numbers', pageNoResult.chars.filter((c) => c.group === 'body').every((c) => c.pt === pageNoResult.fontSizes.body));
 summary('calibrate');

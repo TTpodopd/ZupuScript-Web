@@ -5,6 +5,7 @@
  */
 import { CONFIDENCE_THRESHOLD } from '@/lib/constants';
 import type { Page } from '@/model/types';
+import { aggregatePageAlignment } from './alignment';
 import { renderPreviewBinary } from './preview';
 
 export interface VerifyMetrics {
@@ -14,6 +15,10 @@ export interface VerifyMetrics {
   charHitRate: number;
   /** 平均偏移量（px）：每个字框内重建墨迹质心与字符中心的平均距离 */
   avgOffsetPx: number;
+  /** 原图对齐率：字心与原图墨迹质心一致的比例 */
+  origAlignRate: number;
+  /** 原图平均偏移（px）：字心 vs 原图墨迹质心 */
+  origAvgOffsetPx: number;
   totalChars: number;
   recognizedChars: number;
   lowConfChars: number;
@@ -91,10 +96,14 @@ export function computeVerify(page: Page, origBin: Uint8Array, width: number, he
     }
   }
 
+  const alignStats = aggregatePageAlignment(page.chars, origBin, width, height);
+
   return {
     iou,
     charHitRate: withText.length > 0 ? hits / withText.length : 0,
     avgOffsetPx: offsetCount > 0 ? offsetSum / offsetCount : 0,
+    origAlignRate: alignStats.total > 0 ? alignStats.aligned / alignStats.total : 1,
+    origAvgOffsetPx: alignStats.avgOffsetPx,
     totalChars: page.chars.length,
     recognizedChars: withText.length,
     lowConfChars: page.chars.filter((c) => c.conf < CONFIDENCE_THRESHOLD).length,

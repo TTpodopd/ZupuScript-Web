@@ -23,19 +23,25 @@ export function estimateCharSide(chars: Pick<CharItem, 'bbox'>[]): number {
   return median(sides);
 }
 
-/** 一维 x 聚类：同列容差 ≈ 0.6 字宽 */
+/** 一维 x 聚类：相邻字 cx 距列心 <0.4 字宽且列宽 ≤0.48 字宽（防链式合并多列） */
 export function clusterCharColumns(chars: CharItem[], charSideRef?: number): CharColumn[] {
   if (chars.length === 0) return [];
   const side = charSideRef ?? estimateCharSide(chars);
-  const tol = side * 0.6;
+  const closeTol = side * 0.4;
+  const maxSpan = side * 0.48;
   const sorted = [...chars].sort((a, b) => a.cx - b.cx);
   const groups: CharItem[][] = [[sorted[0]]];
   for (let i = 1; i < sorted.length; i += 1) {
     const cur = sorted[i];
-    const lastGroup = groups[groups.length - 1];
-    const refX = median(lastGroup.map((c) => c.cx));
-    if (cur.cx - refX < tol) lastGroup.push(cur);
-    else groups.push([cur]);
+    const group = groups[groups.length - 1];
+    const refX = median(group.map((c) => c.cx));
+    const minX = Math.min(...group.map((c) => c.cx), cur.cx);
+    const maxX = Math.max(...group.map((c) => c.cx), cur.cx);
+    if (cur.cx - refX < closeTol && maxX - minX <= maxSpan) {
+      group.push(cur);
+    } else {
+      groups.push([cur]);
+    }
   }
   return groups.map((group) => ({
     cx: median(group.map((c) => c.cx)),
@@ -102,14 +108,118 @@ export function flagColumnSpacingAnomalies(chars: CharItem[], charSideRef?: numb
   return flagged;
 }
 
+function bboxOverlapRatio(a: [number, number, number, number], b: [number, number, number, number]): number {
+  const x0 = Math.max(a[0], b[0]);
+  const y0 = Math.max(a[1], b[1]);
+  const x1 = Math.min(a[2], b[2]);
+  const y1 = Math.min(a[3], b[3]);
+  if (x1 <= x0 || y1 <= y0) return 0;
+  const inter = (x1 - x0) * (y1 - y0);
+  const areaA = Math.max(1, (a[2] - a[0]) * (a[3] - a[1]));
+  const areaB = Math.max(1, (b[2] - b[0]) * (b[3] - b[1]));
+  return inter / Math.min(areaA, areaB);
+}
+
+/** 剔除中心过近或 bbox 高度重叠的重复字框 */
+export function dedupeOverlappingChars(chars: CharItem[], charSideRef?: number): CharItem[] {
+  if (chars.length < 2) return chars;
+  const side = charSideRef ?? estimateCharSide(chars);
+  const minDist = side * 0.36;
+  const sorted = [...chars].sort((a, b) => {
+    const areaA = (a.bbox[2] - a.bbox[0]) * (a.bbox[3] - a.bbox[1]);
+    const areaB = (b.bbox[2] - b.bbox[0]) * (b.bbox[3] - b.bbox[1]);
+    return areaB - areaA;
+  });
+  const kept: CharItem[] = [];
+  for (const c of sorted) {
+    const dup = kept.some((k) => {
+      const dist = Math.hypot(c.cx - k.cx, c.cy - k.cy);
+      if (dist >= minDist) return false;
+      // 横向相邻的两个独立字（如排行标签「次子」）中心距可小于 0.36 字宽，
+      // 但包围盒不重叠且水平间隙足够，不能当作重复框删除。
+      const hGap = Math.max(c.bbox[0], k.bbox[0]) - Math.min(c.bbox[2], k.bbox[2]);
+      const vGap = Math.max(c.bbox[1], k.bbox[1]) - Math.min(c.bbox[3], k.bbox[3]);
+      if (Math.max(hGap, vGap) >= side * 0.35) return false;
+      return bboxOverlapRatio(c.bbox, k.bbox) > 0.22 || dist < side * 0.3;
+    });
+    if (!dup) kept.push(c);
+  }
+  return kept;
+}
+
+/**
+ * 竖排列内 x 对齐、横向排行标签 y 对齐，消除分割字框漂移。
+ * 仅对同列 ≥2 字生效；竖排 outlier（距列心 >0.5 字宽）不强行吸附。
+ */
+export function snapCharsToColumnCenters(chars: CharItem[], charSideRef?: number): CharItem[] {
+  if (chars.length === 0) return [];
+  const side = charSideRef ?? estimateCharSide(chars);
+  const columns = clusterCharColumns(chars, side);
+  const byId = new Map(
+    chars.map((c) => [c.id, { ...c, bbox: [...c.bbox] as [number, number, number, number] }]),
+  );
+
+  for (const col of columns) {
+    if (col.charIds.length < 2) continue;
+
+    if (col.kind === 'rank_label') {
+      const members = col.charIds.map((id) => byId.get(id)).filter((c): c is CharItem => Boolean(c));
+      const colCy = median(members.map((c) => c.cy));
+      for (const c of members) {
+        const shiftY = colCy - c.cy;
+        c.cy = colCy;
+        c.bbox = [c.bbox[0], c.bbox[1] + shiftY, c.bbox[2], c.bbox[3] + shiftY];
+      }
+      continue;
+    }
+
+    const colCx = col.cx;
+    for (const id of col.charIds) {
+      const c = byId.get(id);
+      if (!c || c.kind === 'side') continue;
+      const shiftX = colCx - c.cx;
+      if (Math.abs(shiftX) > side * 0.5) continue;
+      c.cx = colCx;
+      c.bbox = [c.bbox[0] + shiftX, c.bbox[1], c.bbox[2] + shiftX, c.bbox[3]];
+    }
+
+    // 列内行距规整：仅列内 x 已对齐（xSpread 小）且行距稳定时微调 cy
+    const colChars = col.charIds
+      .map((id) => byId.get(id))
+      .filter((c): c is CharItem => Boolean(c && c.kind !== 'side'))
+      .sort((a, b) => a.cy - b.cy);
+    if (colChars.length < 3) continue;
+    const xSpread = Math.max(...colChars.map((c) => c.cx)) - Math.min(...colChars.map((c) => c.cx));
+    if (xSpread > side * 0.22) continue;
+    const gaps = colChars.slice(1).map((c, i) => c.cy - colChars[i].cy);
+    const medGap = median(gaps);
+    if (medGap < side * 0.45) continue;
+    const gapStd = Math.sqrt(gaps.reduce((s, g) => s + (g - medGap) ** 2, 0) / gaps.length);
+    if (gapStd > side * 0.22) continue;
+
+    const anchorY = colChars[0].cy;
+    for (let i = 0; i < colChars.length; i += 1) {
+      const c = colChars[i];
+      const targetCy = anchorY + i * medGap;
+      const shiftY = targetCy - c.cy;
+      if (Math.abs(shiftY) > side * 0.28) continue;
+      c.cy = targetCy;
+      c.bbox = [c.bbox[0], c.bbox[1] + shiftY, c.bbox[2], c.bbox[3] + shiftY];
+    }
+  }
+
+  return [...byId.values()];
+}
+
 export function applyColumnStructure(
   chars: CharItem[],
   charSideRef?: number,
 ): CharItem[] {
   const side = charSideRef ?? estimateCharSide(chars);
-  const columns = clusterCharColumns(chars, side);
-  const spacingFlags = flagColumnSpacingAnomalies(chars, side);
-  const byId = new Map(chars.map((c) => [c.id, { ...c }]));
+  const deduped = dedupeOverlappingChars(chars, side);
+  const columns = clusterCharColumns(deduped, side);
+  const spacingFlags = flagColumnSpacingAnomalies(deduped, side);
+  const byId = new Map(deduped.map((c) => [c.id, { ...c }]));
 
   for (const col of columns) {
     for (const id of col.charIds) {

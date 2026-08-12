@@ -12,9 +12,10 @@ import {
   CHAR_SPLIT_REL_AREA,
 } from '@/lib/constants';
 import { connectedComponents, type ComponentBox } from '@/imaging/raster';
-import type { BorderRect, CharItem, TagRect, TreeLine } from '@/model/types';
+import type { BorderRect, CharItem, SourceKind, TagRect, TreeLine } from '@/model/types';
 import { median, uuid } from '@/lib/utils';
 import { supplementMarginChars } from '@/segment/marginChars';
+import { inkCentroidInRect } from '@/imaging/ink';
 
 /** 方形核二值膨胀（可分离滑窗），用于把一个汉字内断开的笔画聚合成单一字框。 */
 export function dilateForCharacterGrouping(bin: Uint8Array, width: number, height: number, radius: number): Uint8Array {
@@ -51,6 +52,31 @@ function tightenBox(bin: Uint8Array, width: number, height: number, box: Compone
   return maxX < minX ? null : { label: box.label, x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, area };
 }
 
+function boxToCharItem(
+  b: TaggedBox,
+  bin: Uint8Array,
+  width: number,
+  height: number,
+): CharItem {
+  const centroid = inkCentroidInRect(bin, width, height, b.x, b.y, b.w, b.h);
+  const cx = centroid?.cx ?? b.x + b.w / 2;
+  const cy = centroid?.cy ?? b.y + b.h / 2;
+  return {
+    id: uuid(),
+    text: null,
+    cx,
+    cy,
+    bbox: [b.x, b.y, b.x + b.w, b.y + b.h] as [number, number, number, number],
+    pt: 0,
+    conf: 0,
+    note: b.wasSplit ? ('split' as const) : b.wasMerge ? ('merge' as const) : ('empty' as const),
+    source: 'manual' as const,
+    edited: false,
+    group: 'body' as const,
+    kind: 'text' as const,
+  };
+}
+
 /** 在二值图上抹除谱系线（线宽自适应，细线少扩边以免吃掉笔画） */
 export function eraseLines(bin: Uint8Array, width: number, height: number, lines: TreeLine[]): Uint8Array {
   const out = new Uint8Array(bin);
@@ -77,6 +103,40 @@ export function eraseLines(bin: Uint8Array, width: number, height: number, lines
 }
 
 type LayoutRect = Pick<BorderRect | TagRect, 'x' | 'y' | 'w' | 'h'>;
+
+export interface SegmentOptions {
+  sourceKind?: SourceKind;
+}
+
+interface SegmentThresholds {
+  minArea: number;
+  minFill: number;
+  smallFragmentArea: number;
+  phantomFill: number;
+  supplementFill: number;
+  minSide: number;
+}
+
+function segmentThresholds(kind: SourceKind): SegmentThresholds {
+  if (kind === 'pdf') {
+    return {
+      minArea: 24,
+      minFill: 0.07,
+      smallFragmentArea: 14,
+      phantomFill: 0.1,
+      supplementFill: 0.08,
+      minSide: 10,
+    };
+  }
+  return {
+    minArea: CHAR_MIN_AREA,
+    minFill: 0.045,
+    smallFragmentArea: 6,
+    phantomFill: 0.07,
+    supplementFill: 0.06,
+    minSide: 8,
+  };
+}
 
 /** 已确认的实心边框与装饰块不参与字符分割。 */
 export function eraseLayoutRects(
@@ -261,12 +321,47 @@ function inkFillInBox(
   return ink / Math.max(1, (x1 - x0) * (y1 - y0));
 }
 
+function countInkInBox(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  box: Pick<ComponentBox, 'x' | 'y' | 'w' | 'h'>,
+): number {
+  const x0 = Math.max(0, box.x);
+  const y0 = Math.max(0, box.y);
+  const x1 = Math.min(width, box.x + box.w);
+  const y1 = Math.min(height, box.y + box.h);
+  let ink = 0;
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) ink += bin[y * width + x];
+  }
+  return ink;
+}
+
+/** 噪声碎片：边长过小且墨迹量不足以构成汉字笔画 */
+function isNoiseFragment(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  b: Pick<ComponentBox, 'x' | 'y' | 'w' | 'h'>,
+  typicalSide: number,
+  minSide: number,
+): boolean {
+  const short = Math.min(b.w, b.h);
+  const ink = countInkInBox(bin, width, height, b);
+  if (short < minSide && ink < typicalSide * 1.8) return true;
+  if (short < Math.max(5, typicalSide * 0.3) && ink < typicalSide * 2.4) return true;
+  return false;
+}
+
 function supplementMissedChars(
   bin: Uint8Array,
   width: number,
   height: number,
   existing: CharItem[],
   typicalH: number,
+  minArea: number,
+  minFill: number,
 ): CharItem[] {
   const { boxes } = connectedComponents(bin, width, height);
   const minSize = Math.max(CHAR_MIN_SIZE, Math.round(typicalH * 0.45));
@@ -274,16 +369,17 @@ function supplementMissedChars(
   const extras: CharItem[] = [];
 
   for (const b of boxes) {
-    if (b.area < CHAR_MIN_AREA || b.w < minSize || b.h < minSize) continue;
+    if (b.area < minArea || b.w < minSize || b.h < minSize) continue;
     if (b.w > maxSize || b.h > maxSize) continue;
     const aspect = Math.max(b.w, b.h) / Math.max(1, Math.min(b.w, b.h));
     if (aspect > 2.4) continue;
-    if (inkFillInBox(bin, width, height, b) < 0.06) continue;
+    if (inkFillInBox(bin, width, height, b) < minFill) continue;
+    if (isNoiseFragment(bin, width, height, b, typicalH, Math.max(6, Math.round(typicalH * 0.4)))) continue;
 
     const cx = b.x + b.w / 2;
     const cy = b.y + b.h / 2;
     const near = existing.some(
-      (c) => Math.hypot(c.cx - cx, c.cy - cy) < Math.max(minSize, typicalH * 0.42),
+      (c) => Math.hypot(c.cx - cx, c.cy - cy) < Math.max(minSize, typicalH * 0.34),
     );
     if (near) continue;
 
@@ -310,12 +406,13 @@ function filterPhantomChars(
   bin: Uint8Array,
   width: number,
   height: number,
+  minFill: number,
 ): CharItem[] {
   return chars.filter((c) => {
     const w = c.bbox[2] - c.bbox[0];
     const h = c.bbox[3] - c.bbox[1];
     const fill = inkFillInBox(bin, width, height, { x: c.bbox[0], y: c.bbox[1], w, h });
-    return fill >= 0.07;
+    return fill >= minFill;
   });
 }
 
@@ -330,17 +427,21 @@ export function segmentChars(
   lines: TreeLine[],
   excludedRects: LayoutRect[] = [],
   borderRectsForMargin: LayoutRect[] = excludedRects,
+  options?: SegmentOptions,
 ): CharItem[] {
+  const thresholds = segmentThresholds(options?.sourceKind ?? 'image');
   const withoutLines = eraseLines(bin, width, height, lines);
   const cleaned = eraseLayoutRects(withoutLines, width, height, excludedRects);
   const { labels, boxes: fragments } = connectedComponents(cleaned, width, height);
   const denoised = new Uint8Array(cleaned);
-  const smallLabels = new Set(fragments.filter((box) => box.area < 6).map((box) => box.label));
+  const smallLabels = new Set(
+    fragments.filter((box) => box.area < thresholds.smallFragmentArea).map((box) => box.label),
+  );
   if (smallLabels.size > 0) {
     for (let i = 0; i < denoised.length; i += 1) if (smallLabels.has(labels[i])) denoised[i] = 0;
   }
   // 半径过大会把竖排相邻字和线端残留黏成一个框；高分辨率页面也限制在 5px 内。
-  const groupingRadius = Math.max(2, Math.min(5, Math.round(Math.min(width, height) / 650)));
+  const groupingRadius = Math.max(2, Math.min(4, Math.round(Math.min(width, height) / 650)));
   const grouped = connectedComponents(dilateForCharacterGrouping(denoised, width, height, groupingRadius), width, height).boxes;
   const boxes = grouped.map((box) => tightenBox(denoised, width, height, box)).filter((box): box is ComponentBox => box !== null);
 
@@ -349,10 +450,10 @@ export function segmentChars(
     (b) => {
       const aspect = Math.max(b.w, b.h) / Math.max(1, Math.min(b.w, b.h));
       const fill = b.area / Math.max(1, b.w * b.h);
-      return b.area >= CHAR_MIN_AREA && b.w >= CHAR_MIN_SIZE * 1.5 && b.h >= CHAR_MIN_SIZE * 1.5
+      return b.area >= thresholds.minArea && b.w >= CHAR_MIN_SIZE * 1.5 && b.h >= CHAR_MIN_SIZE * 1.5
         // 先允许中等长条进入投影拆分；最终字框会再次按 2.2 的长宽比收口。
         && b.w <= CHAR_MAX_SIZE && b.h <= CHAR_MAX_SIZE && aspect <= 4
-        && fill >= 0.045;
+        && fill >= thresholds.minFill;
     },
   );
   if (raw.length === 0) return [];
@@ -387,25 +488,21 @@ export function segmentChars(
   let chars: CharItem[] = tightenedSplitBoxes
     .filter((b) => {
       const aspect = Math.max(b.w, b.h) / Math.max(1, Math.min(b.w, b.h));
-      return b.w >= CHAR_MIN_SIZE && b.h >= CHAR_MIN_SIZE && aspect <= 2.2;
+      return b.w >= CHAR_MIN_SIZE && b.h >= CHAR_MIN_SIZE && aspect <= 2.2
+        && !isNoiseFragment(cleaned, width, height, b, typicalSide, thresholds.minSide);
     })
-    .map((b) => ({
-      id: uuid(),
-      text: null,
-      cx: b.x + b.w / 2,
-      cy: b.y + b.h / 2,
-      bbox: [b.x, b.y, b.x + b.w, b.y + b.h] as [number, number, number, number],
-      pt: 0,
-      conf: 0,
-      note: b.wasSplit ? ('split' as const) : b.wasMerge ? ('merge' as const) : ('empty' as const),
-      source: 'manual' as const,
-      edited: false,
-      group: 'body' as const,
-      kind: 'text' as const,
-    }));
+    .map((b) => boxToCharItem(b, cleaned, width, height));
 
-  chars = supplementMissedChars(denoised, width, height, chars, typicalH);
-  chars = filterPhantomChars(chars, cleaned, width, height);
+  chars = supplementMissedChars(
+    denoised,
+    width,
+    height,
+    chars,
+    typicalH,
+    thresholds.minArea,
+    thresholds.supplementFill,
+  );
+  chars = filterPhantomChars(chars, cleaned, width, height, thresholds.phantomFill);
   chars = supplementMarginChars(
     cleaned,
     denoised,

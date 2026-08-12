@@ -44,6 +44,8 @@ async function getTesseractVert(): Promise<TesseractWorker> {
   return tessVert;
 }
 
+const CJK_GLYPH_RE = /^[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u{20000}-\u{323AF}\u3007\u3021-\u3029\u3038-\u303B]$/u;
+
 const api: OcrWorkerAPI = {
   async ocrChars(items) {
     const out: LocalOcrResult[] = [];
@@ -53,28 +55,22 @@ const api: OcrWorkerAPI = {
       try {
         const votes = new Map<string, { score: number; count: number; confidenceSum: number }>();
         let totalPasses = 0;
+        const addVote = (glyph: string | null, weight: number, confidence01: number) => {
+          if (!glyph || !CJK_GLYPH_RE.test(glyph)) return; // 字母/数字/标点/符号不参与投票
+          const vote = votes.get(glyph) ?? { score: 0, count: 0, confidenceSum: 0 };
+          vote.score += weight + confidence01;
+          vote.count += 1;
+          vote.confidenceSum += confidence01;
+          votes.set(glyph, vote);
+        };
         for (const dataUrl of item.dataUrls) {
           const { data: dn } = await wn.recognize(dataUrl);
           totalPasses += 1;
-          const normal = [...dn.text.trim().replace(/\s+/g, '')][0] ?? null;
-          if (normal) {
-            const vote = votes.get(normal) ?? { score: 0, count: 0, confidenceSum: 0 };
-            vote.score += 1 + (dn.confidence ?? 0) / 100;
-            vote.count += 1;
-            vote.confidenceSum += (dn.confidence ?? 0) / 100;
-            votes.set(normal, vote);
-          }
+          addVote([...dn.text.trim().replace(/\s+/g, '')][0] ?? null, 1, (dn.confidence ?? 0) / 100);
           if (wv) {
             const { data: dv } = await wv.recognize(dataUrl);
             totalPasses += 1;
-            const vertical = [...dv.text.trim().replace(/\s+/g, '')][0] ?? null;
-            if (vertical) {
-              const vote = votes.get(vertical) ?? { score: 0, count: 0, confidenceSum: 0 };
-              vote.score += 1.25 + (dv.confidence ?? 0) / 100;
-              vote.count += 1;
-              vote.confidenceSum += (dv.confidence ?? 0) / 100;
-              votes.set(vertical, vote);
-            }
+            addVote([...dv.text.trim().replace(/\s+/g, '')][0] ?? null, 1.25, (dv.confidence ?? 0) / 100);
           }
         }
         let text: string | null = null;

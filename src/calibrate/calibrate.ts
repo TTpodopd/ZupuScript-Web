@@ -174,6 +174,11 @@ export function calibratePage(
   if (fontSizes.title === 0) fontSizes.title = fontSizes.body;
   if (fontSizes.pageno === 0) fontSizes.pageno = fontSizes.body;
 
+  // 页码使用与主体正文完全一致的字号。细横笔的真实墨迹高度不参与字号计算，
+  // 左页边算法仅负责定位和字框；正文/标题/排行的标定规则保持不变。
+  const hasPageNumbers = page.chars.some((c) => c.kind === 'side' && c.group === 'pageno');
+  if (hasPageNumbers && fontSizes.body > 0) fontSizes.pageno = fontSizes.body;
+
   // 人工覆盖
   if (overrides) {
     for (const k of ['body', 'title', 'pageno', 'rank'] as const) {

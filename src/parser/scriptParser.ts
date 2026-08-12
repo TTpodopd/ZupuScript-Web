@@ -102,7 +102,7 @@ function parsePageBlock(code: string, index: number, name: string, width: number
     return { id: uuid(), text, cx, cy, bbox: [cx - half, cy - half, cx + half, cy + half], pt, conf: 1, note: text === null ? 'blurry' : 'ok', source: 'manual', edited: false, group, kind };
   });
   const artifacts: ArtifactStroke[] = tuples(section(code, 'ARTIFACT_STROKES')).map((v) => { const f = fields(v); return { id: uuid(), x1: numberValue(f[0], symbols), y1: numberValue(f[1], symbols), x2: numberValue(f[2], symbols), y2: numberValue(f[3], symbols), widthPx: numberValue(f[4], symbols) }; });
-  const source: SourceInfo = { name: `${name}${index > 0 ? ` 第${index + 1}页` : ''}`, widthPx: width || 1200, heightPx: height || 1600, dpi: 300 };
+  const source: SourceInfo = { kind: 'script', name: `${name}${index > 0 ? ` 第${index + 1}页` : ''}`, widthPx: width || 1200, heightPx: height || 1600, dpi: 0 };
   const resolvedFontSizes = { ...fontSizes };
   if (resolvedFontSizes.body <= 0) resolvedFontSizes.body = charsFor('TEXT_CHARS', 'text')[0]?.pt ?? 0;
   return { id: uuid(), projectId: '', index, status: 'proofread', source, calibration: { pxPerMm: pxPerMm || 11.811, pageMm: [source.widthPx / (pxPerMm || 11.811), source.heightPx / (pxPerMm || 11.811)], deskewDeg: 0 }, fontSizes: resolvedFontSizes, borderRects: rects, tagRects: tags, treeLines: lines, treeNodes: nodes, chars: [...charsFor('TEXT_CHARS', 'text'), ...charsFor('SIDE_CHARS', 'side')], artifacts, imageKey: '' };

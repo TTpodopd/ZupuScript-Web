@@ -99,7 +99,9 @@ export const BLANK_PAGE_PROBE_MAX_EDGE = 256;
 /** PDF 本地拆页渲染 DPI（矢量页框约 1pt，450 DPI 下约 6px，配合边缘检测可稳定识别） */
 export const PDF_RENDER_DPI = 450;
 /** PDF/矢量源二值化后笔画加粗半径（连接 anti-alias 断点，0=关闭） */
-export const PDF_STROKE_DILATE_RADIUS = 2;
+export const PDF_STROKE_DILATE_RADIUS = 4;
+/** PDF 字符分割用二值图：小连通域剔除下限（高于扫描图，抑制矢量渲染噪点） */
+export const PDF_SEGMENT_DENOISE_MIN_AREA = 22;
 /** 节点圆扫描半径范围 */
 export const NODE_R_MIN = 6;
 export const NODE_R_MAX = 28;

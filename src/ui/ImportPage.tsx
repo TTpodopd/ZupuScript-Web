@@ -14,6 +14,8 @@ import { naturalCompare, pagesPendingAnalysis, uuid } from '@/lib/utils';
 import { parseGeneratedScript } from '@/parser/scriptParser';
 import { isBlankCanvas, isBlankImageBlob } from '@/imaging/blankPage';
 import { PDF_RENDER_DPI } from '@/lib/constants';
+import { preprocessProfileFor, resolveSourceKind } from '@/imaging/sourceProfile';
+import { thickenPdfRenderedPage } from '@/imaging/pdfRender';
 
 const IMAGE_RE = /\.(png|jpe?g|webp|tiff?)$/i;
 const PDF_RE = /\.pdf$/i;
@@ -72,6 +74,7 @@ async function renderPdfPages(
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+    thickenPdfRenderedPage(canvas, 2);
     if (isBlankCanvas(canvas)) {
       onBlankPage?.(pageNo);
       onProgress(++done, wanted.size);
@@ -147,7 +150,7 @@ export default function ImportPage() {
                 uuid(),
                 currentProjectId,
                 index++,
-                { name: f.name, widthPx: width, heightPx: height, dpi: 0 },
+                { name: f.name, kind: 'image', widthPx: width, heightPx: height, dpi: 0 },
                 imageKey,
               ),
             );
@@ -192,7 +195,7 @@ export default function ImportPage() {
             uuid(),
             currentProjectId,
             index++,
-            { name: `${file.name} 第${r.pageNo}页`, page: r.pageNo, widthPx: r.width, heightPx: r.height, dpi: PDF_RENDER_DPI },
+            { name: `${file.name} 第${r.pageNo}页`, kind: 'pdf', page: r.pageNo, widthPx: r.width, heightPx: r.height, dpi: PDF_RENDER_DPI },
             imageKey,
           ),
         );

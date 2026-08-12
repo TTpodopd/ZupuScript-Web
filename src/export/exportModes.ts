@@ -1,4 +1,5 @@
 import type { Page } from '@/model/types';
+import { resolveSourceKind } from '@/imaging/sourceProfile';
 
 /** 校对成果导出模式 */
 export type ExportMode =
@@ -12,7 +13,7 @@ export function getExportablePages(pages: Page[]): Page[] {
 }
 
 export function projectFromPdf(pages: Page[]): boolean {
-  return pages.some((p) => /\.pdf/i.test(p.source.name) || (p.source.page ?? 0) > 0);
+  return pages.some((p) => resolveSourceKind(p.source) === 'pdf');
 }
 
 export function defaultExportMode(pages: Page[]): ExportMode {

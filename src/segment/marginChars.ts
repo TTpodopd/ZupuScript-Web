@@ -273,12 +273,15 @@ function boxesToMarginChars(
       const cx = b.x + b.w / 2;
       const cy = b.y + b.h / 2;
       const aspect = Math.max(b.w, b.h) / Math.max(1, Math.min(b.w, b.h));
+      const fill = inkFillInBox(bin, width, height, b);
       return (
         isMarginPoint(cx, cy, bounds)
         && b.w >= CHAR_MIN_SIZE
         && b.h >= CHAR_MIN_SIZE
         && aspect <= 2.8
-        && inkFillInBox(bin, width, height, b) >= 0.05
+        && fill >= 0.05
+        && fill < 0.5 // 实心装饰块（书签/黑块）不是文字
+        && !isMarginNoise(bin, width, height, b, bodyTypicalH)
       );
     })
     .map((b) => {
@@ -387,7 +390,9 @@ function segmentMarginScale(
     if (!isMarginPoint(cx, cy, bounds)) continue;
     const aspect = Math.max(b.w, b.h) / Math.max(1, Math.min(b.w, b.h));
     if (aspect > 2.6) continue;
-    if (inkFillInBox(scrubbed, width, height, b) < 0.05) continue;
+    const fill = inkFillInBox(scrubbed, width, height, b);
+    if (fill < 0.05 || fill >= 0.5) continue;
+    if (isMarginNoise(scrubbed, width, height, b, bodyTypicalH)) continue;
     const near = chars.some((c) => Math.hypot(c.cx - cx, c.cy - cy) < Math.max(CHAR_MIN_SIZE, b.h * 0.38));
     if (near) continue;
     const meta = classifyMarginChar(cx, cy, b.h, bounds, width, height, bodyTypicalH);
@@ -429,6 +434,111 @@ function overlapsBodyChar(margin: CharItem, body: CharItem, bodyTypicalH: number
   return dx < bodySide * 0.55 && dy < bodySide * 0.55;
 }
 
+/** 页边噪声碎片：边长过小且墨迹量不足（线头、斑点），不构成汉字 */
+function isMarginNoise(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  b: Pick<ComponentBox, 'x' | 'y' | 'w' | 'h'>,
+  bodyTypicalH: number,
+): boolean {
+  const short = Math.min(b.w, b.h);
+  let ink = 0;
+  const x0 = Math.max(0, b.x);
+  const y0 = Math.max(0, b.y);
+  const x1 = Math.min(width, b.x + b.w);
+  const y1 = Math.min(height, b.y + b.h);
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) ink += bin[y * width + x];
+  }
+  if (short < 8 && ink < bodyTypicalH * 1.8) return true;
+  if (short < Math.max(5, bodyTypicalH * 0.3) && ink < bodyTypicalH * 2.4) return true;
+  return false;
+}
+
+/**
+ * 页码/卷次等汉字数字（三、一、二…）由若干细横笔组成，连通域后长宽比超限被丢弃。
+ * 在页边区把同列细横笔按垂直间隙聚合成字框补回。
+ */
+function reconstructMarginDigits(
+  bin: Uint8Array,
+  width: number,
+  height: number,
+  bounds: PageContentBounds,
+  bodyTypicalH: number,
+  existing: CharItem[],
+): CharItem[] {
+  const { boxes } = connectedComponents(bin, width, height);
+  const strokes = boxes.filter((b) => {
+    const cx = b.x + b.w / 2;
+    const cy = b.y + b.h / 2;
+    if (!isMarginPoint(cx, cy, bounds)) return false;
+    if (b.w < bodyTypicalH * 0.3 || b.w > bodyTypicalH * 2.2) return false;
+    if (b.h < 2 || b.h > bodyTypicalH * 0.5) return false;
+    return inkFillInBox(bin, width, height, b) >= 0.25;
+  });
+  if (strokes.length === 0) return [];
+
+  const cols: ComponentBox[][] = [];
+  for (const s of [...strokes].sort((a, b) => a.x - b.x)) {
+    const cx = s.x + s.w / 2;
+    const col = cols.find((c) => Math.abs(c[0].x + c[0].w / 2 - cx) < bodyTypicalH * 0.5);
+    if (col) col.push(s);
+    else cols.push([s]);
+  }
+
+  const out: CharItem[] = [];
+  const pushGroup = (group: ComponentBox[]) => {
+    const ink = group.reduce((sum, b) => sum + b.area, 0);
+    if (ink < bodyTypicalH * 1.2) return;
+    const x0 = Math.min(...group.map((b) => b.x));
+    const y0 = Math.min(...group.map((b) => b.y));
+    const x1 = Math.max(...group.map((b) => b.x + b.w));
+    const y1 = Math.max(...group.map((b) => b.y + b.h));
+    const w = x1 - x0;
+    const h = y1 - y0;
+    if (w < bodyTypicalH * 0.4 || h < bodyTypicalH * 0.4) return;
+    if (Math.max(w, h) / Math.max(1, Math.min(w, h)) > 2.2) return;
+    const cx = (x0 + x1) / 2;
+    const cy = (y0 + y1) / 2;
+    const near = [...existing, ...out].some(
+      (c) => Math.hypot(c.cx - cx, c.cy - cy) < bodyTypicalH * 0.5,
+    );
+    if (near) return;
+    out.push({
+      id: uuid(),
+      text: null,
+      cx,
+      cy,
+      bbox: [x0, y0, x1, y1] as [number, number, number, number],
+      pt: 0,
+      conf: 0,
+      note: 'empty' as const,
+      source: 'manual' as const,
+      edited: false,
+      group: 'pageno' as const,
+      kind: 'side' as const,
+    });
+  };
+
+  for (const col of cols) {
+    const sorted = [...col].sort((a, b) => a.y - b.y);
+    let group: ComponentBox[] = [sorted[0]];
+    for (let i = 1; i < sorted.length; i += 1) {
+      const prev = group[group.length - 1];
+      const gap = sorted[i].y - (prev.y + prev.h);
+      if (gap <= bodyTypicalH * 0.6) {
+        group.push(sorted[i]);
+      } else {
+        pushGroup(group);
+        group = [sorted[i]];
+      }
+    }
+    pushGroup(group);
+  }
+  return out;
+}
+
 /**
  * 在正文分割完成后补充页边字框：剔除页边区的正文误检，替换为页边专用分割结果。
  */
@@ -445,8 +555,9 @@ export function supplementMarginChars(
   const bodyKept = bodyChars.filter((c) => !isMarginPoint(c.cx, c.cy, bounds));
   const marginChars = segmentMarginScale(cleaned, denoised, width, height, bounds, bodyTypicalH)
     .filter((m) => !bodyKept.some((b) => overlapsBodyChar(m, b, bodyTypicalH)));
+  const digits = reconstructMarginDigits(cleaned, width, height, bounds, bodyTypicalH, [...bodyKept, ...marginChars]);
 
-  const merged = [...bodyKept, ...marginChars];
+  const merged = [...bodyKept, ...marginChars, ...digits];
   merged.sort((a, b) => (Math.abs(a.cy - b.cy) > bodyTypicalH / 2 ? a.cy - b.cy : b.cx - a.cx));
   return merged;
 }

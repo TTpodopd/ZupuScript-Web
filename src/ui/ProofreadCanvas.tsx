@@ -175,7 +175,6 @@ export default function ProofreadCanvas({
         ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
       }
     }
-    for (const r of page.tagRects) drawTagBlock(ctx, r);
     ctx.strokeStyle = '#000000';
     for (const l of page.treeLines) {
       ctx.lineWidth = Math.max(1, l.widthPx);
@@ -195,6 +194,8 @@ export default function ProofreadCanvas({
       ctx.arc(n.cx, n.cy, n.r, 0, Math.PI * 2);
       ctx.stroke();
     }
+    // 装饰书签最后覆盖误检树线/节点；字符层仍在其后绘制，正文不受影响。
+    for (const r of page.tagRects) drawTagBlock(ctx, r);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#000000';

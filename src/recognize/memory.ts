@@ -2,6 +2,7 @@ import { cropBinary } from '@/imaging/raster';
 import { fnv1a } from '@/lib/utils';
 import type { CharItem } from '@/model/types';
 import type { Page } from '@/model/types';
+import { isCjkGlyph } from '@/recognize/prompt';
 import {
   getMemoryByAspect,
   getMemoryByFingerprint,
@@ -99,6 +100,7 @@ export async function recallCharacter(
   const [best, second] = ranked;
   if (!best) return null;
   const [text, evidence] = best;
+  if (!isCjkGlyph(text)) return null; // 记忆中的非汉字条目不召回
   const averageConfidence = evidence.confidenceSum / Math.max(1, evidence.total);
   const decisive = !second || evidence.score >= second[1].score * 1.6;
   const trustedManual = evidence.manual >= 2 && evidence.similarity >= 0.93;
@@ -131,6 +133,7 @@ export async function learnCharacter(
 ): Promise<void> {
   const fingerprint = createGlyphFingerprint(char, bin, width, height);
   if (!fingerprint || [...text].length !== 1) return;
+  if (!isCjkGlyph(text)) return; // 字母/符号等垃圾识别不进入记忆，防止污染召回
   const id = `${fingerprint.fingerprint}:${text}`;
   const existing = (await getMemoryByFingerprint(fingerprint.fingerprint)).find((record) => record.id === id);
   const evidenceKeys = existing?.evidenceKeys ?? [];

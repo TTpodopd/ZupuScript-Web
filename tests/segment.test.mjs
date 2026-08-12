@@ -7,6 +7,24 @@ function block(bin, width, x, y, w, h) {
   }
 }
 
+// 笔画式假字（边框+十字笔画），贴近真实汉字墨迹密度
+function glyph(bin, width, x, y, w, h, t = 2) {
+  for (let xx = x; xx < x + w; xx++) {
+    for (let i = 0; i < t; i++) {
+      bin[(y + i) * width + xx] = 1;
+      bin[(y + h - 1 - i) * width + xx] = 1;
+    }
+  }
+  for (let yy = y; yy < y + h; yy++) {
+    for (let i = 0; i < t; i++) {
+      bin[yy * width + x + i] = 1;
+      bin[yy * width + x + w - 1 - i] = 1;
+    }
+  }
+  for (let xx = x; xx < x + w; xx++) bin[(y + Math.floor(h / 2)) * width + xx] = 1;
+  for (let yy = y; yy < y + h; yy++) bin[yy * width + x + Math.floor(w / 2)] = 1;
+}
+
 section('断笔聚合');
 const width = 160;
 const height = 100;
@@ -57,13 +75,13 @@ block(pageBin, pageWidth, 120, 80, 16, 16);
 block(pageBin, pageWidth, 160, 80, 16, 16);
 block(pageBin, pageWidth, 200, 80, 16, 16);
 // 左侧页边标题（大字，竖排）
-block(pageBin, pageWidth, 18, 40, 28, 34);
-block(pageBin, pageWidth, 18, 82, 28, 34);
-block(pageBin, pageWidth, 18, 124, 28, 34);
-block(pageBin, pageWidth, 18, 166, 28, 34);
+glyph(pageBin, pageWidth, 18, 40, 28, 34);
+glyph(pageBin, pageWidth, 18, 82, 28, 34);
+glyph(pageBin, pageWidth, 18, 124, 28, 34);
+glyph(pageBin, pageWidth, 18, 166, 28, 34);
 // 左下角页码（小字）
-block(pageBin, pageWidth, 22, 360, 12, 14);
-block(pageBin, pageWidth, 22, 382, 12, 14);
+glyph(pageBin, pageWidth, 22, 360, 12, 14, 1);
+glyph(pageBin, pageWidth, 22, 382, 12, 14, 1);
 // 模拟外框：正文在 x=90 以右
 const frameBorder = [{ x: 88, y: 20, w: 4, h: 360 }];
 

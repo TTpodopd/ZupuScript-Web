@@ -11,7 +11,7 @@ export const ZPPROJ_VERSION = '2.0';
 /** .zpproj.json 单页结构（字段名与 PRD 13 章一致，紧凑命名） */
 interface ZpprojPageJson {
   version: string;
-  source: { name: string; page?: number; width_px: number; height_px: number; dpi?: number };
+  source: { name: string; kind?: 'image' | 'pdf' | 'script'; page?: number; width_px: number; height_px: number; dpi?: number };
   calibration: { px_per_mm: number; page_mm: [number, number]; deskew_deg: number };
   font_sizes: FontSizes;
   recognition?: {
@@ -56,6 +56,7 @@ function pageToJson(page: Page): ZpprojPageJson {
     version: ZPPROJ_VERSION,
     source: {
       name: page.source.name,
+      kind: page.source.kind,
       page: page.source.page,
       width_px: page.source.widthPx,
       height_px: page.source.heightPx,
@@ -122,6 +123,7 @@ function jsonToPage(json: ZpprojPageJson, projectId: string, index: number): Pag
     index,
     {
       name: json.source?.name ?? `page-${index + 1}`,
+      kind: json.source?.kind,
       page: json.source?.page,
       widthPx: width,
       heightPx: height,

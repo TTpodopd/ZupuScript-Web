@@ -62,9 +62,25 @@ block(pdfBin, pdfW, 0, 0, pdfW, 4);
 block(pdfBin, pdfW, 0, 0, 4, pdfH);
 block(pdfBin, pdfW, pdfW - 4, 0, 4, pdfH);
 block(pdfBin, pdfW, 0, pdfH - 4, pdfW, 4);
-const pdfRects = detectRects(pdfBin, pdfW, pdfH);
+const pdfRects = detectRects(pdfBin, pdfW, pdfH, { sourceKind: 'pdf' });
 check('页边 4px 细框可被检出', pdfRects.borderRects.length >= 1);
 check('不会把整页误判为实心黑块', pdfRects.borderRects.every((r) => r.w * r.h < pdfW * pdfH * 0.12));
+
+section('PDF 内缩白边页框');
+const insetW = 1200;
+const insetH = 1600;
+const insetBin = new Uint8Array(insetW * insetH);
+const ix = 90;
+const iy = 120;
+const iw = 1020;
+const ih = 1360;
+const bar = 5;
+block(insetBin, insetW, ix, iy, iw, bar);
+block(insetBin, insetW, ix, iy + ih - bar, iw, bar);
+block(insetBin, insetW, ix, iy, bar, ih);
+block(insetBin, insetW, ix + iw - bar, iy, bar, ih);
+const insetRects = detectRects(insetBin, insetW, insetH, { sourceKind: 'pdf' });
+check('内缩页框四边均可检出', insetRects.borderRects.length >= 4);
 
 section('扫描件厚页框（内缩白边）');
 const scanW = 2400;

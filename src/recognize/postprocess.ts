@@ -7,6 +7,8 @@ import { DICT_CANDIDATE_CONF, DICT_HIT_CONF, DICT_LOW_CONF_MAX } from '@/lib/con
 import { isSurnameChar } from './dict/surnames';
 import { isDictChar } from './dict/genealogy';
 import { isVariant, normalizeVariant } from './dict/variants';
+import { isCjkGlyph, sanitizeCharOutput } from './prompt';
+import type { CharNote } from '@/model/types';
 import type { RecognizedItem } from './types';
 
 export interface PostprocessContext {
@@ -35,17 +37,23 @@ export function postprocessItems(
   _ctx: PostprocessContext = { isGenealogy: true },
 ): PostprocessedItem[] {
   return items.map((item) => {
-    const result: PostprocessedItem = { ...item };
+    const cleaned = sanitizeCharOutput(item.char, item.note);
+    const result: PostprocessedItem = {
+      ...item,
+      char: cleaned.char,
+      note: (cleaned.note ?? item.note) as CharNote | undefined,
+    };
 
     // 异体字记录
-    if (item.char && isVariant(item.char)) {
-      result.normalizedChar = normalizeVariant(item.char);
+    if (result.char && isVariant(result.char)) {
+      result.normalizedChar = normalizeVariant(result.char);
     }
 
-    // 候选兜底：conf 极低且有候选
-    const candidates = (item as RecognizedItem & { candidates?: string[] }).candidates;
+    // 候选兜底：conf 极低且有候选（仅 CJK 候选有效）
+    const candidates = (item as RecognizedItem & { candidates?: string[] }).candidates?.filter(isCjkGlyph);
+    result.candidates = candidates;
     if (
-      item.char === null &&
+      result.char === null &&
       candidates &&
       candidates.length > 0 &&
       item.confidence < DICT_LOW_CONF_MAX
@@ -60,8 +68,8 @@ export function postprocessItems(
     }
 
     // 字典提权：命中且 conf 略低于阈值
-    if (item.char && item.confidence < DICT_HIT_CONF) {
-      if (isSurnameChar(item.char) || isDictChar(item.char)) {
+    if (result.char && result.confidence < DICT_HIT_CONF) {
+      if (isSurnameChar(result.char) || isDictChar(result.char)) {
         result.confidence = DICT_HIT_CONF;
         result.dictBoosted = true;
       }
