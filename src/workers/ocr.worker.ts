@@ -9,7 +9,7 @@
  */
 import * as Comlink from 'comlink';
 import { createWorker } from 'tesseract.js';
-import type { LocalOcrResult, OcrWorkerAPI } from '@/recognize/local/tesseract';
+import type { LocalOcrResult, LocalOcrWorkerProgress, OcrWorkerAPI } from '@/recognize/local/tesseract';
 
 type TesseractWorker = {
   recognize: (image: string) => Promise<{ data: { text: string; confidence?: number } }>;
@@ -19,10 +19,23 @@ type TesseractWorker = {
 
 let tessNormal: TesseractWorker | null = null;
 let tessVert: TesseractWorker | null = null;
+let reportProgress: ((progress: LocalOcrWorkerProgress) => void) | undefined;
+
+const assetRoot = new URL(`${import.meta.env.BASE_URL}tesseract/`, self.location.origin).href;
+const tesseractOptions = {
+  workerPath: `${assetRoot}worker.min.js`,
+  corePath: `${assetRoot}core`,
+  langPath: `${assetRoot}tessdata`,
+  cacheMethod: 'write',
+  gzip: true,
+  logger: (message: { status: string; progress: number }) => {
+    reportProgress?.({ status: message.status, progress: message.progress });
+  },
+};
 
 async function getTesseractNormal(): Promise<TesseractWorker> {
   if (!tessNormal) {
-    const w = (await createWorker('chi_tra', 1)) as unknown as TesseractWorker;
+    const w = (await createWorker('chi_tra', 1, tesseractOptions)) as unknown as TesseractWorker;
     await w.setParameters({
       tessedit_pageseg_mode: '10', // PSM_SINGLE_CHAR
       preserve_interword_spaces: '0',
@@ -34,7 +47,7 @@ async function getTesseractNormal(): Promise<TesseractWorker> {
 
 async function getTesseractVert(): Promise<TesseractWorker> {
   if (!tessVert) {
-    const w = (await createWorker('chi_tra_vert', 1)) as unknown as TesseractWorker;
+    const w = (await createWorker('chi_tra_vert', 1, tesseractOptions)) as unknown as TesseractWorker;
     await w.setParameters({
       tessedit_pageseg_mode: '10',
       preserve_interword_spaces: '0',
@@ -47,9 +60,11 @@ async function getTesseractVert(): Promise<TesseractWorker> {
 const CJK_GLYPH_RE = /^[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u{20000}-\u{323AF}\u3007\u3021-\u3029\u3038-\u303B]$/u;
 
 const api: OcrWorkerAPI = {
-  async ocrChars(items) {
+  async ocrChars(items, onProgress) {
+    reportProgress = onProgress;
     const out: LocalOcrResult[] = [];
-    const wn = await getTesseractNormal();
+    try {
+      const wn = await getTesseractNormal();
     const wv = await getTesseractVert().catch(() => null); // vert 可能不支持，降级单引擎
     for (const item of items) {
       try {
@@ -95,7 +110,10 @@ const api: OcrWorkerAPI = {
         out.push({ key: item.key, text: null, confidence: 0, candidates: [] });
       }
     }
-    return out;
+      return out;
+    } finally {
+      reportProgress = undefined;
+    }
   },
 
   async terminate() {

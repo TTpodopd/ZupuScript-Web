@@ -376,9 +376,9 @@ export async function recognizePage(
     const unresolved = page.chars.filter((char) => !remembered.has(char.id) && !protectedSkip.has(char.id));
     batchCount = Math.max(1, Math.ceil(unresolved.length / 12));
     report(0, `本地识别记忆命中 ${remembered.size} 字，继续深度识别 ${unresolved.length} 字`);
-    const results = await localOcrChars(unresolved, bin, width, height, (doneChars, total) => {
+    const results = await localOcrChars(unresolved, bin, width, height, (doneChars, total, detail) => {
       const done = Math.ceil((doneChars / Math.max(1, total)) * batchCount);
-      report(done, `正在深度识别文字：${doneChars}/${total} 字，已完成多轮投票复核`);
+      report(done, detail ? `本地 OCR 初始化：${detail}` : `正在深度识别文字：${doneChars}/${total} 字，已完成多轮投票复核`);
     });
     for (const c of unresolved) {
       const result = results.get(c.id);

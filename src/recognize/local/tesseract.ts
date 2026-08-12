@@ -9,8 +9,16 @@ import type { CharItem } from '@/model/types';
 import { arrayBufferToBase64 } from '@/lib/utils';
 
 export interface OcrWorkerAPI {
-  ocrChars(items: Array<{ key: string; dataUrls: string[] }>): Promise<LocalOcrResult[]>;
+  ocrChars(
+    items: Array<{ key: string; dataUrls: string[] }>,
+    onProgress?: (progress: LocalOcrWorkerProgress) => void,
+  ): Promise<LocalOcrResult[]>;
   terminate(): Promise<void>;
+}
+
+export interface LocalOcrWorkerProgress {
+  status: string;
+  progress: number;
 }
 
 export interface LocalOcrResult {
@@ -22,6 +30,28 @@ export interface LocalOcrResult {
 
 let workerInstance: Worker | null = null;
 let workerApi: Comlink.Remote<OcrWorkerAPI> | null = null;
+const LOCAL_OCR_CHUNK_TIMEOUT_MS = 180_000;
+
+function resetLocalOcrWorker(): void {
+  workerInstance?.terminate();
+  workerInstance = null;
+  workerApi = null;
+}
+
+async function runWithLocalOcrTimeout<T>(operation: Promise<T>): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      resetLocalOcrWorker();
+      reject(new Error('本地 OCR 初始化或识别超时，请重试；若仍失败请刷新页面检查本地资源'));
+    }, LOCAL_OCR_CHUNK_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
+}
 
 function getWorker(): Comlink.Remote<OcrWorkerAPI> {
   if (!workerApi) {
@@ -77,7 +107,7 @@ export async function localOcrChars(
   bin: Uint8Array,
   pageWidth: number,
   pageHeight: number,
-  onProgress?: (done: number, total: number) => void,
+  onProgress?: (done: number, total: number, message?: string) => void,
 ): Promise<Map<string, LocalOcrResult>> {
   const api = getWorker();
   const results = new Map<string, LocalOcrResult>();
@@ -92,7 +122,19 @@ export async function localOcrChars(
         charCropToDataUrl(bin, pageWidth, pageHeight, c.bbox, 8, 128),
       ]),
     })));
-    const partial = await api.ocrChars(items);
+    let partial: LocalOcrResult[];
+    try {
+      partial = await runWithLocalOcrTimeout(api.ocrChars(
+        items,
+        Comlink.proxy((progress: LocalOcrWorkerProgress) => {
+          const percent = Math.round(Math.max(0, Math.min(1, progress.progress)) * 100);
+          onProgress?.(start, chars.length, `${progress.status} ${percent}%`);
+        }),
+      ));
+    } catch (error) {
+      resetLocalOcrWorker();
+      throw error;
+    }
     for (const result of partial) results.set(result.key, result);
     onProgress?.(Math.min(chars.length, start + chunk.length), chars.length);
   }
@@ -104,7 +146,5 @@ export async function shutdownLocalOcr(): Promise<void> {
   if (workerApi) {
     await workerApi.terminate().catch(() => undefined);
   }
-  workerInstance?.terminate();
-  workerInstance = null;
-  workerApi = null;
+  resetLocalOcrWorker();
 }

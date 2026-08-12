@@ -22,7 +22,7 @@ import { useSettingsStore } from '@/store/settingsStore';
 import type { PipelineAPI, ProgressInfo } from '@/workers/pipeline.worker';
 import { recognizePage } from '@/recognize/orchestrator';
 import { resolveFixedBookTitle } from '@/recognize/fixedTitle';
-import { buildProviderConfig, currentRecognitionSettingsKey, describeActiveModel, isLocalRecognitionMode, resolveRecognitionMode } from '@/recognize/buildConfig';
+import { buildLocalProviderConfig, buildProviderConfig, currentRecognitionSettingsKey, describeActiveModel, isLocalRecognitionMode, resolveRecognitionMode } from '@/recognize/buildConfig';
 import { analyzeBorderLayoutVision, canUseVisionLayout, formatVisionFallbackMessage } from '@/recognize/layoutVision';
 import type { RecognizeProgress } from '@/recognize/types';
 import { grantConsent, hasConsented } from '@/privacy/consent';
@@ -342,7 +342,10 @@ export default function AnalyzePage() {
     if (!stored) throw new Error('找不到预处理结果，无法开始识别');
     const settings = useSettingsStore.getState();
     const mode = resolveRecognitionMode();
-    const { cfg } = await buildProviderConfig();
+    // A 模式走独立本地路由，不触发 keystore、Provider 或 API Key 初始化。
+    const cfg = mode === 'A'
+      ? buildLocalProviderConfig()
+      : (await buildProviderConfig()).cfg;
     if (!isLocalRecognitionMode(mode) && !hasConsented(mode)) {
       throw new Error('请先勾选同意云端识别，或在设置中保存 API Key');
     }
@@ -514,7 +517,7 @@ export default function AnalyzePage() {
     setBatchProgress({ totalPages: pendingPages.length, currentPageIndex: pendingPages.length, phaseBase: 0 });
     if (fail > 0) {
       setLastBatchError(lastError);
-      setMessage(`批处理完成：成功 ${ok} 页，失败 ${fail} 页（失败页可单独重试）`);
+      setMessage(`处理失败：${lastError ?? "未知错误"}（成功 ${ok} 页，失败 ${fail} 页）`);
       batchStartedRef.current = '';
     } else {
       setMessage(`批处理完成：成功 ${ok} 页`);

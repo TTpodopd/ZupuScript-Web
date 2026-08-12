@@ -31,6 +31,18 @@ export function currentRecognitionSettingsKey(): string {
   return `${mode}:${settings.activeConnectionId}:${settings.activeModelId}:${RECOGNITION_PROMPT_VERSION}`;
 }
 
+/** 构造完全本地的识别配置，不访问 keystore 或任何云端 Provider。 */
+export function buildLocalProviderConfig(): ProviderConfig {
+  const settings = useSettingsStore.getState();
+  return {
+    provider: 'local',
+    model: 'local-tesseract',
+    concurrency: settings.concurrency,
+    timeoutMs: settings.timeoutMs,
+    maxRetries: settings.maxRetries,
+  };
+}
+
 /** 从设置与 keystore 构建识别配置（分析页批处理与识别面板共用） */
 export async function buildProviderConfig(
   passphrase?: string,
@@ -42,13 +54,7 @@ export async function buildProviderConfig(
   if (mode === 'A') {
     return {
       mode,
-      cfg: {
-        provider: 'local',
-        model: 'local-tesseract',
-        concurrency: settings.concurrency,
-        timeoutMs: settings.timeoutMs,
-        maxRetries: settings.maxRetries,
-      },
+      cfg: buildLocalProviderConfig(),
     };
   }
 
