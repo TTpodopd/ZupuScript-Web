@@ -37,6 +37,8 @@ export interface ProviderSettings {
 }
 
 export interface ModelEntry {
+  /** Stable UI identity; independent from the editable API model id. */
+  uiKey?: string;
   id: string;
   name: string;
 }
@@ -63,7 +65,7 @@ export const DEFAULT_MODEL_CONNECTIONS: ModelConnection[] = [
     endpoint: 'https://generativelanguage.googleapis.com',
     proxyUrl: '',
     models: [{ id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' }],
-    expanded: true,
+    expanded: false,
   },
   {
     id: 'official-openai',
@@ -107,13 +109,28 @@ export const DEFAULT_MODEL_CONNECTIONS: ModelConnection[] = [
     endpoint: '',
     proxyUrl: '',
     models: [{ id: 'qwen-vl-max', name: 'qwen-vl-max' }],
-    expanded: true,
+    expanded: false,
   },
 ];
 
+function ensureModelUiKeys(connections: ModelConnection[]): ModelConnection[] {
+  return connections.map((connection) => {
+    const used = new Set<string>();
+    const models = connection.models.map((model, index) => {
+      let uiKey = model.uiKey && !used.has(model.uiKey) ? model.uiKey : connection.id + '-model-' + index;
+      while (used.has(uiKey)) uiKey = uiKey + '-' + index;
+      used.add(uiKey);
+      return { ...model, uiKey };
+    });
+    return { ...connection, models };
+  });
+}
+
 function ensureLocalConnection(connections: ModelConnection[]): ModelConnection[] {
-  const rest = connections.filter((c) => c.id !== LOCAL_MODEL_CONNECTION_ID);
-  return [LOCAL_MODEL_CONNECTION, ...rest];
+  const rest = connections
+    .filter((c) => c.id !== LOCAL_MODEL_CONNECTION_ID)
+    .map((c) => ({ ...c, expanded: false }));
+  return ensureModelUiKeys([LOCAL_MODEL_CONNECTION, ...rest]);
 }
 
 /** 为已持久化设置补全新增的官方分组（如 DeepSeek） */
@@ -162,8 +179,8 @@ interface SettingsState {
   addConnection: (kind?: ModelConnection['kind']) => string;
   removeConnection: (connectionId: string) => void;
   addModel: (connectionId: string) => void;
-  removeModel: (connectionId: string, modelId: string) => void;
-  updateModel: (connectionId: string, modelId: string, patch: Partial<ModelEntry>) => void;
+  removeModel: (connectionId: string, modelUiKey: string) => void;
+  updateModel: (connectionId: string, modelUiKey: string, patch: Partial<Omit<ModelEntry, 'uiKey'>>) => void;
   activeConnection: () => ModelConnection | undefined;
   setConcurrency: (n: number) => void;
   setTimeoutMs: (n: number) => void;
@@ -256,7 +273,7 @@ export const useSettingsStore = create<SettingsState>()(
       toggleConnection: (connectionId) => set((s) => ({ connections: s.connections.map((c) => c.id === connectionId ? { ...c, expanded: !c.expanded } : c) })),
       addConnection: (kind = 'compatible') => {
         const id = `${kind}-${Date.now()}`;
-        const connection: ModelConnection = { id, kind, name: kind === 'compatible' ? '新建兼容分组' : '新建官方分组', description: kind === 'compatible' ? 'OpenAI 协议兼容服务。' : '官方模型服务。', provider: kind === 'compatible' ? 'custom' : 'openai', endpoint: '', proxyUrl: '', models: [{ id: `model-${Date.now()}`, name: '' }], expanded: true };
+        const connection: ModelConnection = { id, kind, name: kind === 'compatible' ? '新建兼容分组' : '新建官方分组', description: kind === 'compatible' ? 'OpenAI 协议兼容服务。' : '官方模型服务。', provider: kind === 'compatible' ? 'custom' : 'openai', endpoint: '', proxyUrl: '', models: [{ id: `model-${Date.now()}`, name: '' }], expanded: false };
         set((s) => ({ connections: [...s.connections, connection] }));
         return id;
       },
@@ -270,12 +287,19 @@ export const useSettingsStore = create<SettingsState>()(
         return { connections, activeConnectionId: next.id, activeModelId: model, provider: { provider: next.provider, model, endpoint: next.endpoint, proxyUrl: next.proxyUrl } };
       }),
       addModel: (connectionId) => set((s) => ({ connections: s.connections.map((c) => c.id === connectionId ? { ...c, models: [...c.models, { id: `model-${Date.now()}-${c.models.length}`, name: '' }] } : c) })),
-      removeModel: (connectionId, modelId) => set((s) => ({ connections: s.connections.map((c) => c.id === connectionId ? { ...c, models: c.models.length <= 1 ? c.models : c.models.filter((m) => m.id !== modelId) } : c) })),
-      updateModel: (connectionId, modelId, patch) => set((s) => {
-        const connections = s.connections.map((c) => c.id === connectionId ? { ...c, models: c.models.map((m) => m.id === modelId ? { ...m, ...patch } : m) } : c);
+      removeModel: (connectionId, modelUiKey) => set((s) => ({ connections: s.connections.map((c) => c.id === connectionId ? { ...c, models: c.models.length <= 1 ? c.models : c.models.filter((m, index) => (m.uiKey ?? c.id + '-model-' + index) !== modelUiKey) } : c) })),
+      updateModel: (connectionId, modelUiKey, patch) => set((s) => {
+        const connection = s.connections.find((c) => c.id === connectionId);
+        const previous = connection?.models.find((m, index) => (m.uiKey ?? connection.id + '-model-' + index) === modelUiKey);
+        const connections = s.connections.map((c) => c.id === connectionId
+          ? { ...c, models: c.models.map((m, index) => (m.uiKey ?? c.id + '-model-' + index) === modelUiKey ? { ...m, ...patch, uiKey: modelUiKey } : m) }
+          : c);
         const active = connections.find((c) => c.id === s.activeConnectionId);
-        const nextActiveModelId = connectionId === s.activeConnectionId && modelId === s.activeModelId ? patch.id ?? s.activeModelId : s.activeModelId;
-        const selected = active?.models.find((m) => m.id === nextActiveModelId);
+        const editingActive = connectionId === s.activeConnectionId && previous?.id === s.activeModelId;
+        const nextActiveModelId = editingActive ? patch.id ?? s.activeModelId : s.activeModelId;
+        const selected = editingActive
+          ? active?.models.find((m) => m.uiKey === modelUiKey)
+          : active?.models.find((m) => m.id === nextActiveModelId);
         return active && selected ? { connections, activeModelId: selected.id, provider: { provider: active.provider, model: selected.id, endpoint: active.endpoint, proxyUrl: active.proxyUrl } } : { connections };
       }),
       activeConnection: () => {

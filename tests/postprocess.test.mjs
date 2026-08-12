@@ -1,6 +1,6 @@
 /** 后处理模块测试：字典提权、候选兜底、异体记录、数量守恒 */
 import { check, eq, approx, section, summary } from './helpers.mjs';
-import { postprocessItems } from '../src/recognize/postprocess.ts';
+import { correctAutomatedZiJieConfusion, postprocessItems } from '../src/recognize/postprocess.ts';
 import { DICT_HIT_CONF, DICT_CANDIDATE_CONF, DICT_LOW_CONF_MAX } from '../src/lib/constants.ts';
 
 section('字典提权');
@@ -72,6 +72,26 @@ section('异体字记录');
   eq('异体原字保留', out[0].char, '爲');
 }
 
+section('子/孑定向消歧');
+{
+  const lowConfidence = postprocessItems([
+    { id: 0, char: '孑', confidence: 0.72, note: 'blurry', candidates: ['孑', '子'] },
+  ]);
+  eq('族谱低置信「孑」纠正为「子」', lowConfidence[0].char, '子');
+  eq('纠正后标记候选兜底', lowConfidence[0].candidateUsed, true);
+
+  const autoBody = correctAutomatedZiJieConfusion({
+    id: 'body-1', text: '孑', cx: 0, cy: 0, bbox: [0, 0, 10, 10], pt: 10,
+    conf: 0.95, note: 'ok', source: 'llm', edited: false, group: 'body', kind: 'text',
+  });
+  eq('自动正文中的「孑」最终纠正为「子」', autoBody.text, '子');
+
+  const manualBody = correctAutomatedZiJieConfusion({ ...autoBody, text: '孑', source: 'manual', edited: true });
+  eq('手工确认的「孑」保持原字', manualBody.text, '孑');
+
+  const title = correctAutomatedZiJieConfusion({ ...autoBody, text: '孑', group: 'title' });
+  eq('标题中的「孑」保持原字', title.text, '孑');
+}
 section('数量守恒');
 {
   const items = Array.from({ length: 50 }, (_, i) => ({

@@ -36,5 +36,7 @@ check('差异形状得分低于相同形状', scoreGlyphMatch(a, c) < scoreGlyph
 section('形近字候选扩展');
 const expanded = expandGlyphCandidates('遷', []);
 check('混淆组扩展含形近字', expanded.includes('遞') || expanded.includes('邁'));
+const ziExpanded = expandGlyphCandidates('孑', []);
+check('「孑」候选扩展包含高频「子」', ziExpanded.includes('子'));
 
 summary('glyph-verify');

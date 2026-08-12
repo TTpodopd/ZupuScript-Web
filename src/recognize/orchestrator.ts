@@ -19,7 +19,7 @@ import {
   isValidChar,
   RECOGNITION_PROMPT_VERSION,
 } from './prompt';
-import { postprocessItems } from './postprocess';
+import { correctAutomatedZiJieConfusion, postprocessItems } from './postprocess';
 import { localOcrChars } from './local/tesseract';
 import { learnCharacters, recallCharacters } from './memory';
 import type {
@@ -560,6 +560,8 @@ export async function recognizePage(
       })
       .map((c) => (fixedTitle.has(c.id) ? { ...c, edited: true } : c));
   }
+
+  chars = chars.map(correctAutomatedZiJieConfusion);
 
   chars = chars.map((c) => {
     const segNote = segmentNotes.get(c.id);

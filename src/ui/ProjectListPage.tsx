@@ -1,8 +1,8 @@
 /**
- * 多项目列表（F1.6）：页数、完成度、占用空间、单独删除；.zpproj.json 导入/导出（F1.5）。
+ * 多项目列表（F1.6）：页数、完成度、占用空间、单独删除与 .zpproj.json 导出。
  */
-import { useEffect, useRef, useState } from 'react';
-import { Download, FolderOpen, Pencil, Plus, Search, Trash2, Upload } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Download, FolderOpen, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { Button } from '@/ui/components/ui/button';
 import {
   Dialog,
@@ -13,8 +13,8 @@ import {
   DialogTitle,
 } from '@/ui/components/ui/dialog';
 import { Input } from '@/ui/components/ui/input';
-import { estimateUsage, listPagesOfProject, savePage, saveProject } from '@/storage/db';
-import { exportProject, importProject } from '@/model/zpproj';
+import { estimateUsage, listPagesOfProject } from '@/storage/db';
+import { exportProject } from '@/model/zpproj';
 import { useProjectStore } from '@/store/projectStore';
 import { downloadText, formatBytes, formatTime } from '@/lib/utils';
 import type { PageStatus } from '@/model/types';
@@ -33,7 +33,6 @@ export default function ProjectListPage() {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState('');
-  const fileRef = useRef<HTMLInputElement>(null);
 
   const visibleProjects = [...projects]
     .filter((project) => project.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
@@ -77,19 +76,6 @@ export default function ProjectListPage() {
     createProject(name);
     setNewName('');
     setView('import');
-  };
-
-  const handleImportZpproj = async (file: File) => {
-    try {
-      const text = await file.text();
-      const { project, pages } = await importProject(text);
-      await saveProject(project);
-      for (const p of pages) await savePage(p);
-      await loadFromDB();
-      alert(`已导入项目「${project.name}」（${pages.length} 页）。注意：原图不在项目文件内，请重新导入图片以关联。`);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : '导入失败');
-    }
   };
 
   const handleExportZpproj = async (projectId: string, name: string) => {
@@ -136,20 +122,6 @@ export default function ProjectListPage() {
         <Button onClick={handleCreate} className="shrink-0 rounded-xl">
           <Plus className="h-4 w-4" /> 新建项目
         </Button>
-        <Button variant="outline" className="shrink-0 rounded-xl" onClick={() => fileRef.current?.click()}>
-          <Upload className="h-4 w-4" /> 导入 .zpproj
-        </Button>
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".json,.zpproj.json"
-          className="hidden"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) void handleImportZpproj(f);
-            e.target.value = '';
-          }}
-        />
       </div>
 
       {/* 空状态 */}
@@ -159,7 +131,7 @@ export default function ProjectListPage() {
             <FolderOpen className="h-7 w-7 text-muted-foreground" />
           </div>
           <p className="text-sm text-muted-foreground">
-            还没有项目。新建一个，或导入 .zpproj.json 继续之前的工作。
+            还没有项目，请先新建一个项目。
           </p>
         </div>
       )}

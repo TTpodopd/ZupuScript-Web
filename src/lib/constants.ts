@@ -3,7 +3,7 @@
  * 所有跨模块硬约定只允许在此定义一次，禁止在别处复制字面量。
  */
 
-export const APP_NAME = 'ZupuScript Web';
+export const APP_NAME = '族谱网';
 
 /* ---------- 标定与换算（锁定，全链路不得改） ---------- */
 /** 1 pt = 0.352778 mm */

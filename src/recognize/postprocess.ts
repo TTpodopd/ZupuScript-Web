@@ -8,7 +8,7 @@ import { isSurnameChar } from './dict/surnames';
 import { isDictChar } from './dict/genealogy';
 import { isVariant, normalizeVariant } from './dict/variants';
 import { isCjkGlyph, sanitizeCharOutput } from './prompt';
-import type { CharNote } from '@/model/types';
+import type { CharItem, CharNote } from '@/model/types';
 import type { RecognizedItem } from './types';
 
 export interface PostprocessContext {
@@ -52,6 +52,19 @@ export function postprocessItems(
     // 候选兜底：conf 极低且有候选（仅 CJK 候选有效）
     const candidates = (item as RecognizedItem & { candidates?: string[] }).candidates?.filter(isCjkGlyph);
     result.candidates = candidates;
+
+    // 族谱中「子」是高频排行/亲属字，「孑」极罕见；模型给出「子」候选或低置信时定向消歧。
+    if (
+      _ctx.isGenealogy
+      && result.char === '孑'
+      && (result.confidence < 0.9 || candidates?.includes('子'))
+    ) {
+      result.char = '子';
+      result.confidence = Math.max(result.confidence, DICT_CANDIDATE_CONF);
+      result.candidates = [...new Set(['子', ...(candidates ?? []), '孑'])].slice(0, 3);
+      result.candidateUsed = true;
+    }
+
     if (
       result.char === null &&
       candidates &&
@@ -77,4 +90,19 @@ export function postprocessItems(
 
     return result;
   });
+}
+/**
+ * 最终写回前清理「子/孑」系统性误识别。
+ * 仅处理自动识别的正文/排行，用户手工确认、标题和页码保持原字。
+ */
+export function correctAutomatedZiJieConfusion(char: CharItem): CharItem {
+  if (char.text !== '孑') return char;
+  if (char.edited || char.source === 'manual') return char;
+  if (char.group !== 'body' && char.group !== 'rank') return char;
+  return {
+    ...char,
+    text: '子',
+    conf: Math.max(char.conf, DICT_CANDIDATE_CONF),
+    note: char.note === 'empty' ? 'blurry' : char.note,
+  };
 }

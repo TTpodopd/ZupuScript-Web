@@ -1,17 +1,15 @@
 /**
- * 导入页（F1.1–F1.3）：拖拽 / 点选 / Ctrl+V 粘贴 / 文件夹批量导入；
+ * 导入页（F1.1–F1.3）：拖拽 / 点选 / Ctrl+V 粘贴；
  * PDF 用 PDF.js 本地拆页渲染（可指定页码范围与渲染 DPI）。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CheckCircle2, FileCode2, FolderInput, ImagePlus, Loader2 } from 'lucide-react';
+import { CheckCircle2, ImagePlus, Loader2 } from 'lucide-react';
 import { Button } from '@/ui/components/ui/button';
 import { Input, Label } from '@/ui/components/ui/input';
 import { createEmptyPage } from '@/model/types';
 import { useProjectStore } from '@/store/projectStore';
-import { hasFSAccess, pickDirectory, readImageFilesFromDirectory } from '@/storage/fsaccess';
 import { putImage } from '@/storage/opfs';
 import { naturalCompare, pagesPendingAnalysis, uuid } from '@/lib/utils';
-import { parseGeneratedScript } from '@/parser/scriptParser';
 import { isBlankCanvas, isBlankImageBlob } from '@/imaging/blankPage';
 import { PDF_RENDER_DPI } from '@/lib/constants';
 import { preprocessProfileFor, resolveSourceKind } from '@/imaging/sourceProfile';
@@ -97,7 +95,6 @@ export default function ImportPage() {
   const [pdfRange, setPdfRange] = useState('');
   const [pendingPdfs, setPendingPdfs] = useState<PendingPdf[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
-  const scriptRef = useRef<HTMLInputElement>(null);
 
   const hasContent = pages.length > 0 || pendingPdfs.length > 0;
   const pendingPages = pagesPendingAnalysis(pages);
@@ -105,28 +102,6 @@ export default function ImportPage() {
   const hasPendingAnalysis = pendingPages.length > 0 || pendingPdfs.length > 0;
 
   const appendLog = useCallback((msg: string) => setLog((l) => [...l.slice(-30), msg]), []);
-
-  const importScript = async (file: File) => {
-    if (!currentProjectId) return;
-    setBusy(true);
-    try {
-      const parsed = parseGeneratedScript(await file.text(), file.name);
-      const imported = parsed.map(({ page }, index) => ({
-        ...page,
-        projectId: currentProjectId,
-        index: pages.length + index,
-        source: { ...page.source, name: page.source.name || file.name },
-      }));
-      addPages(imported);
-      appendLog(`已解析脚本 ${file.name}：${imported.length} 个结果页`);
-      setCurrentPage(imported[0]?.id ?? '');
-      setView('editor');
-    } catch (err) {
-      appendLog(`脚本解析失败：${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const importImageFiles = useCallback(
     async (files: File[]) => {
@@ -280,16 +255,6 @@ export default function ImportPage() {
     return () => window.removeEventListener('paste', onPaste);
   }, [handleFiles]);
 
-  const handleFolder = async () => {
-    const dir = await pickDirectory();
-    if (!dir) return;
-    const files = await readImageFilesFromDirectory(dir);
-    if (files.length === 0) {
-      appendLog('所选文件夹内没有可导入的图像文件');
-      return;
-    }
-    await importImageFiles(files);
-  };
 
   if (!currentProjectId) {
     return (
@@ -425,37 +390,6 @@ export default function ImportPage() {
           </div>
         </div>
       )}
-
-      {/* 辅助导入方式 */}
-      <div className="mb-4 rounded-2xl border bg-card p-4 card-shadow">
-        <div className="mb-3">
-          <h2 className="text-sm font-medium">其他导入方式</h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">批量读取文件夹，或直接打开 Scribus 脚本到画布。</p>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          {hasFSAccess() ? (
-            <Button variant="outline" onClick={() => void handleFolder()} disabled={busy} className="w-full rounded-xl">
-              <FolderInput className="h-4 w-4" /> 从文件夹批量导入
-            </Button>
-          ) : (
-            <div className="hidden sm:block" />
-          )}
-          <Button variant="outline" onClick={() => scriptRef.current?.click()} disabled={busy} className="w-full rounded-xl">
-            <FileCode2 className="h-4 w-4" /> 导入脚本到画布
-          </Button>
-        </div>
-        <input
-          ref={scriptRef}
-          type="file"
-          accept=".py,.txt,text/x-python,text/plain"
-          className="hidden"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) void importScript(file);
-            e.target.value = '';
-          }}
-        />
-      </div>
 
       <div className="mb-6 rounded-2xl border border-primary/20 bg-primary/5 p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
