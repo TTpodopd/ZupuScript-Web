@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: monospace; font-size: 14px; margin: 8px; }
+  .row { margin: 4px 0; }
+  img { max-height: 120px; border: 1px solid #ccc; vertical-align: middle; }
+</style>
+</head>
+<body>
+<div id="out">probing...</div>
+<script>
+const id = 'sha256:c1f73b5c89c1f82537d01bbdb477d22482d9437d5d7bc94217fc061aaae92bac';
+const candidates = [
+  'http://127.0.0.1:3080/describe-image/raw/' + id,
+  'http://127.0.0.1:3080/plugins/describe-image/raw/' + id,
+  'http://127.0.0.1:3080/api/describe-image/raw/' + id,
+  'http://127.0.0.1:3080/static/describe-image/raw/' + id,
+  'http://127.0.0.1:3080/describe-image/' + id,
+  'http://127.0.0.1:3080/raw/' + id,
+];
+(async () => {
+  const out = document.getElementById('out');
+  out.textContent = '';
+  for (const url of candidates) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    let info = '';
+    try {
+      const resp = await fetch(url, { method: 'GET' });
+      info = 'HTTP ' + resp.status + ' type=' + (resp.headers.get('content-type') || '?') + ' len=' + (resp.headers.get('content-length') || '?');
+    } catch (e) {
+      info = 'ERR ' + String(e && e.message || e);
+    }
+    row.textContent = url + ' => ' + info;
+    if (/HTTP 200/.test(info)) {
+      const img = document.createElement('img');
+      img.src = url;
+      row.appendChild(document.createElement('br'));
+      row.appendChild(img);
+    }
+    out.appendChild(row);
+  }
+})();
+</script>
+</body>
+</html>

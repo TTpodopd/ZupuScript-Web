@@ -35,14 +35,23 @@ function estimateLayoutVisionCost(cfg: ProviderConfig): number {
   return Math.max(0.02, p.estimateCost(80));
 }
 
-/** 是否可用视觉边框分析（与识别共用 cfg，不再单独选模型） */
-export function canUseVisionLayout(cfg: ProviderConfig, mode: PrivacyMode): boolean {
-  if (mode === 'A' || cfg.provider === 'local' || shouldSkipVisionLayout()) return false;
-  if (!cfg.model?.trim()) return false;
-  if (cfg.provider === 'custom' && !cfg.endpoint?.trim()) return false;
-  return Boolean(cfg.apiKey || cfg.endpoint?.includes('localhost') || cfg.endpoint?.includes('127.0.0.1'));
+/** 返回视觉边框分析不可用的具体原因；空字符串表示可以调用。 */
+export function visionLayoutUnavailableReason(cfg: ProviderConfig, mode: PrivacyMode): string {
+  if (mode === 'A' || cfg.provider === 'local') return '当前为本地识别模式，视觉边框分析需要云端模型';
+  if (shouldSkipVisionLayout()) {
+    const seconds = Math.max(1, Math.ceil((visionRateLimitedUntil - Date.now()) / 1000));
+    return `视觉模型此前触发限流，请约 ${seconds} 秒后重试`;
+  }
+  if (!cfg.model?.trim()) return '未选择视觉分析模型';
+  if (cfg.provider === 'custom' && !cfg.endpoint?.trim()) return '自定义模型未配置 API Base URL';
+  if (!cfg.apiKey && !cfg.endpoint?.includes('localhost') && !cfg.endpoint?.includes('127.0.0.1')) return '当前模型未配置 API Key';
+  return '';
 }
 
+/** 是否可用视觉边框分析（与识别共用 cfg，不再单独选模型） */
+export function canUseVisionLayout(cfg: ProviderConfig, mode: PrivacyMode): boolean {
+  return visionLayoutUnavailableReason(cfg, mode).length === 0;
+}
 export function isRetryableVisionHttpStatus(status: number): boolean {
   return status === 429 || status === 408 || status === 502 || status === 503 || status === 504;
 }
@@ -96,9 +105,8 @@ export async function analyzeBorderLayoutVision(
   if (mode === 'A' || cfg.provider === 'local') {
     throw new Error('全本地模式无法使用视觉边框分析');
   }
-  if (shouldSkipVisionLayout()) {
-    throw new Error('视觉边框分析因限流暂时跳过');
-  }
+  const unavailable = visionLayoutUnavailableReason(cfg, mode);
+  if (unavailable) throw new Error(unavailable);
 
   onProgress?.({ stage: 'encode', message: '正在编码页面图像…' });
   const imageBase64 = await pageBinaryToPngBase64Downscaled(bin, width, height, LAYOUT_VISION_MAX_EDGE);

@@ -58,6 +58,28 @@ export function hammingDistance(a: string, b: string): number {
   return distance;
 }
 
+/** 跨项目隔离时的遗留记录放行阈值：人工证据 + 极高字形相似度 */
+export const LEGACY_CROSS_PROJECT_MIN_SIMILARITY = 0.97;
+
+/**
+ * 记忆记录的项目可见性闸门（泛化保护）：
+ * - 同项目记录：可见；
+ * - 无 projectId 的遗留记录：仅当人工确认证据 ≥2 且相似度 ≥0.97 时跨项目放行
+ *   （人工对几乎相同字形做的定字结论可安全迁移；模型/本地弱证据一律不跨项目）；
+ * - 其他项目的记录：不可见，防止旧谱书字形记忆污染新谱书识别。
+ */
+export function memoryRecordVisible(
+  record: { projectId?: string; manualCount: number },
+  projectId: string | undefined,
+  similarity: number,
+): boolean {
+  if (!record.projectId) {
+    // 遗留记录需要明确的项目上下文才谈得上跨项目放行
+    return Boolean(projectId) && record.manualCount >= 2 && similarity >= LEGACY_CROSS_PROJECT_MIN_SIMILARITY;
+  }
+  return record.projectId === projectId;
+}
+
 async function findCandidates(fingerprint: GlyphFingerprint): Promise<Array<{ record: RecognitionMemoryRecord; similarity: number }>> {
   const exact = await getMemoryByFingerprint(fingerprint.fingerprint);
   const approximate = exact.length > 0
@@ -80,12 +102,14 @@ export async function recallCharacter(
   bin: Uint8Array,
   width: number,
   height: number,
+  projectId?: string,
 ): Promise<RecalledGlyph | null> {
   const fingerprint = createGlyphFingerprint(char, bin, width, height);
   if (!fingerprint) return null;
   const candidates = await findCandidates(fingerprint);
   const grouped = new Map<string, { score: number; similarity: number; total: number; manual: number; confidenceSum: number }>();
   for (const { record, similarity } of candidates) {
+    if (!memoryRecordVisible(record, projectId, similarity)) continue;
     const averageConfidence = record.confidenceSum / Math.max(1, record.totalCount);
     const evidenceWeight = record.manualCount * 4 + record.modelCount * 2 + record.localCount * 0.5;
     const current = grouped.get(record.char) ?? { score: 0, similarity: 0, total: 0, manual: 0, confidenceSum: 0 };
@@ -116,8 +140,9 @@ export async function recallCharacters(
   bin: Uint8Array,
   width: number,
   height: number,
+  projectId?: string,
 ): Promise<Map<string, RecalledGlyph>> {
-  const entries = await Promise.all(chars.map(async (char) => [char.id, await recallCharacter(char, bin, width, height)] as const));
+  const entries = await Promise.all(chars.map(async (char) => [char.id, await recallCharacter(char, bin, width, height, projectId)] as const));
   return new Map(entries.filter((entry): entry is readonly [string, RecalledGlyph] => entry[1] !== null));
 }
 
@@ -130,11 +155,12 @@ export async function learnCharacter(
   width: number,
   height: number,
   evidenceKey: string,
+  projectId?: string,
 ): Promise<void> {
   const fingerprint = createGlyphFingerprint(char, bin, width, height);
   if (!fingerprint || [...text].length !== 1) return;
   if (!isCjkGlyph(text)) return; // 字母/符号等垃圾识别不进入记忆，防止污染召回
-  const id = `${fingerprint.fingerprint}:${text}`;
+  const id = `${projectId ?? 'legacy'}:${fingerprint.fingerprint}:${text}`;
   const existing = (await getMemoryByFingerprint(fingerprint.fingerprint)).find((record) => record.id === id);
   const evidenceKeys = existing?.evidenceKeys ?? [];
   if (evidenceKeys.includes(evidenceKey)) return;
@@ -142,6 +168,7 @@ export async function learnCharacter(
     id,
     ...fingerprint,
     char: text,
+    projectId,
     totalCount: 0,
     manualCount: 0,
     modelCount: 0,
@@ -166,6 +193,7 @@ export async function learnCharacters(
   width: number,
   height: number,
   pageId: string,
+  projectId?: string,
 ): Promise<void> {
   const trusted = chars.filter((char) => char.text && char.conf >= 0.9 && !char.edited);
   await Promise.all(trusted.map((char) => learnCharacter(
@@ -177,6 +205,7 @@ export async function learnCharacters(
     width,
     height,
     `${pageId}:${char.id}:${char.source}`,
+    projectId,
   )));
 }
 
@@ -194,5 +223,6 @@ export async function learnManualCorrection(page: Page, charId: string, text: st
     stored.width,
     stored.height,
     `${page.id}:${char.id}:manual:${text}`,
+    page.projectId,
   );
 }

@@ -10,9 +10,9 @@ import { pageMmFromPx } from '@/calibrate/calibrate';
 import { applyColumnStructure } from '@/segment/columns';
 import { mergeLayoutWithGuide, finalizeTagRects } from '@/layout/applyGuide';
 import { filterSolidGraphicRects } from '@/layout/graphicBlock';
-import { detectTreeLines } from '@/layout/detect';
+import { detectTreeLines, partitionTextOccludingTreeLines } from '@/layout/detect';
 import { detectArtifacts, detectNodes } from '@/layout/nodes';
-import { detectLeftMarginGraphics, rebuildLeftMarginTextRegions, removeCharsInsideMarginGraphics, removeGeometryInsideMarginGraphics, removeGeometryLeftOfFrame, removeNodesInsideMarginGraphics, removeNodesLeftOfFrame } from '@/layout/marginRegions';
+import { detectLeftMarginGraphics, rebuildLeftMarginTextRegions, rebuildRightMarginTextRegions, removeCharsInsideMarginGraphics, removeGeometryInsideMarginGraphics, removeGeometryLeftOfFrame, removeNodesInsideMarginGraphics, removeNodesLeftOfFrame } from '@/layout/marginRegions';
 import { pagesForBatchProcessing, batchProcessingSignature, inferPageRecognitionSettingsKey } from '@/lib/utils';
 import { preprocessProfileFor, resolveSourceKind } from '@/imaging/sourceProfile';
 import type { BorderLayoutGuide, Page } from '@/model/types';
@@ -21,9 +21,8 @@ import { useProjectStore } from '@/store/projectStore';
 import { useSettingsStore } from '@/store/settingsStore';
 import type { PipelineAPI, ProgressInfo } from '@/workers/pipeline.worker';
 import { recognizePage } from '@/recognize/orchestrator';
-import { resolveFixedBookTitle } from '@/recognize/fixedTitle';
 import { buildLocalProviderConfig, buildProviderConfig, currentRecognitionSettingsKey, describeActiveModel, isLocalRecognitionMode, resolveRecognitionMode } from '@/recognize/buildConfig';
-import { analyzeBorderLayoutVision, canUseVisionLayout, formatVisionFallbackMessage } from '@/recognize/layoutVision';
+import { analyzeBorderLayoutVision, canUseVisionLayout, formatVisionFallbackMessage, visionLayoutUnavailableReason } from '@/recognize/layoutVision';
 import type { RecognizeProgress } from '@/recognize/types';
 import { grantConsent, hasConsented } from '@/privacy/consent';
 import { validateAndRefineCharPositions } from '@/verify/alignment';
@@ -212,29 +211,31 @@ export default function AnalyzePage() {
     if (!isLocalRecognitionMode(mode) && hasConsented(mode)) {
       try {
         const { cfg } = await buildProviderConfig();
-        if (!canUseVisionLayout(cfg, mode)) throw new Error('skip-vision');
-        const modelLabel = describeActiveModel(cfg);
-        setMessage(`视觉边框分析（${modelLabel}）…`);
-        const vision = await analyzeBorderLayoutVision(
-          bin as Uint8Array,
-          w,
-          h,
-          { borderRects, tagRects },
-          cfg,
-          mode,
-          (p) => {
-            const pct = p.stage === 'encode' ? 55 : p.stage === 'vision' ? 72 : p.stage === 'done' ? 95 : 60;
-            setProgress({ stage: 'layout', percent: pct });
-            if (p.message) setMessage(p.message);
-          },
-        );
-        borderLayoutGuide = vision.guide;
-        setMessage(`边框规则：${vision.guide.summary.slice(0, 80)}${vision.guide.summary.length > 80 ? '…' : ''}`);
-      } catch (err) {
-        if (err instanceof Error && err.message !== 'skip-vision') {
-          console.warn('[layout-vision]', err);
-          setMessage(formatVisionFallbackMessage(err));
+        if (!canUseVisionLayout(cfg, mode)) {
+          const reason = visionLayoutUnavailableReason(cfg, mode);
+          setMessage(`视觉边框分析未调用：${reason}`);
+        } else {
+          const modelLabel = describeActiveModel(cfg);
+          setMessage(`视觉边框分析（${modelLabel}）…`);
+          const vision = await analyzeBorderLayoutVision(
+            bin as Uint8Array,
+            w,
+            h,
+            { borderRects, tagRects },
+            cfg,
+            mode,
+            (p) => {
+              const pct = p.stage === 'encode' ? 55 : p.stage === 'vision' ? 72 : p.stage === 'done' ? 95 : 60;
+              setProgress({ stage: 'layout', percent: pct });
+              if (p.message) setMessage(p.message);
+            },
+          );
+          borderLayoutGuide = vision.guide;
+          setMessage(`边框规则：${vision.guide.summary.slice(0, 80)}${vision.guide.summary.length > 80 ? '…' : ''}`);
         }
+      } catch (err) {
+        console.warn('[layout-vision]', err);
+        setMessage(formatVisionFallbackMessage(err));
       }
     } else if (isLocalRecognitionMode(mode)) {
       setMessage('本地模式：跳过云端视觉边框，继续字符分割…');
@@ -265,8 +266,16 @@ export default function AnalyzePage() {
     treeLines = removeGeometryLeftOfFrame(removeGeometryInsideMarginGraphics(treeLines, marginGraphics), w, h, borderRects);
     treeNodes = removeNodesLeftOfFrame(removeNodesInsideMarginGraphics(treeNodes, marginGraphics), w, h, borderRects);
     artifacts = removeGeometryLeftOfFrame(removeGeometryInsideMarginGraphics(artifacts, marginGraphics), w, h, borderRects);
-    const segmentOpts = { sourceKind };
+    let segmentOpts = { sourceKind, nodes: treeNodes };
     const probeChars = await api.segment(bin as Uint8Array, w, h, treeLines, borderRects, borderRects, segmentOpts);
+    // 文字上穿过的短误检线不应出现在校对画布；仍把它们传入最终分割以抹除残墨，
+    // 但不保存在 treeLines，从而保留长主干、分支和节点连接。
+    const linePartition = partitionTextOccludingTreeLines(treeLines, probeChars, treeNodes);
+    treeLines = linePartition.kept;
+    treeNodes = detectNodes(bin as Uint8Array, w, h, treeLines);
+    artifacts = detectArtifacts(bin as Uint8Array, w, h, treeLines);
+    segmentOpts = { sourceKind, nodes: treeNodes };
+    const erasureLines = [...treeLines, ...linePartition.occluding];
     const finalizedTags = finalizeTagRects(tagRects, probeChars, bin as Uint8Array, w, h);
     // 左页边书签是区域算法确定的结果，不能被正文探测阶段再次过滤。
     for (const graphic of marginGraphics) {
@@ -279,44 +288,38 @@ export default function AnalyzePage() {
       bin as Uint8Array,
       w,
       h,
-      treeLines,
+      erasureLines,
       [...borderRects, ...tagRects],
       borderRects,
       segmentOpts,
     );
-    const structured = applyColumnStructure(segmented);
+    const structured = applyColumnStructure(segmented, undefined, w);
     const { chars: alignedRaw, stats: alignStats } = validateAndRefineCharPositions(
       structured,
       bin as Uint8Array,
       w,
       h,
     );
-    // 左页边图块内不保留字符框；左下页码单独按横笔结构重建并固定识别。
-    const aligned = rebuildLeftMarginTextRegions(
+    // 左页边图块内不保留字符框；标题和页码只重建字框，内容交给识别阶段。
+    const alignedLeft = rebuildLeftMarginTextRegions(
       removeCharsInsideMarginGraphics(alignedRaw, marginGraphics),
       bin as Uint8Array,
       w,
       h,
       borderRects,
+      marginGraphics,
     );
-    // 临时固定识别：左侧书名栏直接填「倪氏宗譜」，不依赖模型；多余碎片框删除
-    const fixed = resolveFixedBookTitle(aligned, w);
-    const fixedTitle = fixed.assignments;
-    const fixedSkip = fixed.consumedIds;
-    const withTitle = fixedTitle.size > 0
-      ? aligned
-        .filter((c) => {
-          if (fixedTitle.has(c.id)) return true;
-          if (fixedSkip.has(c.id)) return false;
-          const r = fixed.titleRegion;
-          return !r || c.cx < r[0] || c.cx > r[2] || c.cy < r[1] || c.cy > r[3];
-        })
-        .map((c) => (fixedTitle.has(c.id)
-          ? { ...c, text: fixedTitle.get(c.id) ?? null, conf: 0.99, note: 'ok' as const, source: 'manual' as const, edited: true }
-          : c))
-      : aligned;
+    // 右页边同样重建竖排标题字框，补齐右侧大字（如卷次/世次标题）。
+    const aligned = rebuildRightMarginTextRegions(
+      alignedLeft,
+      bin as Uint8Array,
+      w,
+      h,
+      borderRects,
+      marginGraphics,
+    );
     const calibrated = calibratePage(
-      { ...target, chars: withTitle, calibration: { ...target.calibration, pxPerMm: target.calibration.pxPerMm } },
+      { ...target, chars: aligned, calibration: { ...target.calibration, pxPerMm: target.calibration.pxPerMm } },
       undefined,
       { data: bin as Uint8Array, width: w, height: h },
     );
@@ -333,7 +336,7 @@ export default function AnalyzePage() {
     });
     setProgress({ stage: 'segment', percent: 100 });
     setMessage(
-      `分析完成：外框 ${borderRects.length}${borderLayoutGuide ? '（含视觉规则）' : ''}，连线 ${treeLines.length}，节点 ${treeNodes.length}，字符 ${aligned.length}（原图对齐 ${alignStats.aligned}/${alignStats.total}，平均偏移 ${alignStats.avgOffsetPx.toFixed(1)}px）${fixedTitle.size > 0 ? `；书名固定识别 ${fixedTitle.size} 字` : ''}`,
+      `分析完成：外框 ${borderRects.length}${borderLayoutGuide ? '（含视觉规则）' : ''}，连线 ${treeLines.length}，节点 ${treeNodes.length}，字符 ${aligned.length}（原图对齐 ${alignStats.aligned}/${alignStats.total}，平均偏移 ${alignStats.avgOffsetPx.toFixed(1)}px）`,
     );
   };
 
@@ -371,6 +374,9 @@ export default function AnalyzePage() {
       mode,
       settings.pageBudgetCny,
       (p: RecognizeProgress) => setRecognitionProgress(p),
+      // 当前项目左侧竖排书名为固定四字标题；字框仍由原图线框比例计算，
+      // 这里只向识别/后处理提供内容共识，不改变字号和位置。
+      { bookTitle: '倪氏宗譜' },
     );
     updatePage(target.id, {
       chars: result.chars,

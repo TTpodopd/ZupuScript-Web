@@ -307,12 +307,16 @@ export function applyGlyphVerification(
     if (!patch) return char;
     const patchNorm = normalizeGlyphBitmap(patch.data, patch.w, patch.h);
     const verified = verifyGlyphCandidates(patchNorm, draft);
-    const keepText = verified.text ?? draft.primary;
+    // 三轮共识后的主候选不允许被单次字体渲染比对改写。二者冲突时
+    // 留空并标红，避免把弱字形匹配当成已确认的最终填充文字。
+    const conflictsWithConsensus = (draft.routeVotes ?? 0) >= 2
+      && Boolean(verified.text)
+      && verified.text !== draft.primary;
     return {
       ...char,
-      text: keepText,
-      conf: verified.confidence,
-      note: verified.note,
+      text: conflictsWithConsensus ? null : (verified.text ?? draft.primary),
+      conf: conflictsWithConsensus ? 0 : verified.confidence,
+      note: conflictsWithConsensus ? 'blurry' : verified.note,
     };
   });
 }

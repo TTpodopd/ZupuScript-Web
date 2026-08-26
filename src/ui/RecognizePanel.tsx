@@ -49,7 +49,8 @@ export default function RecognizePanel({ page }: { page: Page }) {
   const lowConfCount = page.chars.filter((c) => c.conf < CONFIDENCE_THRESHOLD && c.source !== 'manual').length;
 
   /** 成本预估（远端统一模式 C：整页上云） */
-  const estimate = provider && !localMode ? provider.estimateCost(page.chars.length) * 6 : 0;
+  // 云端整页识别固定执行三轮；每轮沿用整页识别的保守成本系数。
+  const estimate = provider && !localMode ? provider.estimateCost(page.chars.length) * 9 : 0;
 
   const buildConfig = () => buildProviderConfig(passphrase || undefined, apiKeyInput);
 
@@ -70,6 +71,9 @@ export default function RecognizePanel({ page }: { page: Page }) {
         recognizeMode,
         settings.pageBudgetCny,
         setProgress,
+        // 与分析页保持一致：识别完成后的最终写回会按这四字定位
+        // 书名列，并将四个校对框统一为相同尺寸。
+        { bookTitle: '倪氏宗譜' },
       );
       updatePage(page.id, {
         chars,
@@ -85,7 +89,7 @@ export default function RecognizePanel({ page }: { page: Page }) {
       });
       settings.addSessionCost(outcome.costCny);
       setMessage(
-        `识别与模型输出校验完成：${outcome.updatedCount} 字，${outcome.batches} 批（失败 ${outcome.failedBatches}），约 ¥${outcome.costCny.toFixed(3)}`,
+        `三轮识别、定位与字形校验完成：${outcome.updatedCount} 字，${outcome.batches} 批（失败 ${outcome.failedBatches}），约 ¥${outcome.costCny.toFixed(3)}`,
       );
     } catch (err) {
       setMessage(`识别失败：${err instanceof Error ? err.message : String(err)}`);
@@ -188,16 +192,16 @@ export default function RecognizePanel({ page }: { page: Page }) {
                 />
               </div>
               <div className="mt-2 grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
-                <span className={progress.doneBatches > 0 || progress.message.includes('初次') ? 'text-foreground' : ''}>① 初次识别</span>
-                <span className={progress.message.includes('校验') ? 'text-foreground' : ''}>② 模型输出校验</span>
-                <span className={progress.doneBatches === progress.totalBatches ? 'text-foreground' : ''}>③ 结果合并</span>
+                <span className={progress.doneBatches > 0 || progress.message.includes('初次') || progress.message.includes('1/3') ? 'text-foreground' : ''}>① 初次识别</span>
+                <span className={progress.message.includes('2/3') ? 'text-foreground' : ''}>② 独立复核</span>
+                <span className={progress.message.includes('3/3') || progress.message.includes('三轮共识') || progress.doneBatches === progress.totalBatches ? 'text-foreground' : ''}>③ 最终确认</span>
               </div>
             </div>
           )}
           {message && <p className="text-xs text-muted-foreground">{message}</p>}
           {page.status === 'recognized' && (
             <div className="rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">
-              初次识别和模型输出校验已完成。两轮不一致的字符已自动降低置信度，请在结果画布中重点确认。
+              三轮识别、锚点定位和字形校验已完成。未形成两票共识的字符不会自动填充，请在结果画布中重点确认。
             </div>
           )}
         </div>

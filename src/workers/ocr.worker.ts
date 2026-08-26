@@ -78,15 +78,29 @@ const api: OcrWorkerAPI = {
           vote.confidenceSum += confidence01;
           votes.set(glyph, vote);
         };
-        for (const dataUrl of item.dataUrls) {
+        const hasStableWinner = (): boolean => {
+          // 每个字至少完成三种裁剪下的双模型复核，再允许提前结束。
+          if (totalPasses < 6 || votes.size === 0) return false;
+          const ranked = [...votes.values()].sort((a, b) => b.score - a.score);
+          const winner = ranked[0];
+          const runnerUp = ranked[1];
+          const agreement = winner.count / totalPasses;
+          const averageConfidence = winner.confidenceSum / Math.max(1, winner.count);
+          const margin = winner.score - (runnerUp?.score ?? 0);
+          return agreement >= 0.75 && averageConfidence >= 0.68 && margin >= 0.65;
+        };
+        for (let pass = 0; pass < item.dataUrls.length; pass += 1) {
+          const dataUrl = item.dataUrls[pass];
           const { data: dn } = await wn.recognize(dataUrl);
           totalPasses += 1;
-          addVote([...dn.text.trim().replace(/\s+/g, '')][0] ?? null, 1, (dn.confidence ?? 0) / 100);
+          addVote([...dn.text.trim().replace(/\s+/g, '')][0] ?? null, item.orientation === 'horizontal' ? 1.35 : 1, (dn.confidence ?? 0) / 100);
           if (wv) {
             const { data: dv } = await wv.recognize(dataUrl);
             totalPasses += 1;
-            addVote([...dv.text.trim().replace(/\s+/g, '')][0] ?? null, 1.25, (dv.confidence ?? 0) / 100);
+            addVote([...dv.text.trim().replace(/\s+/g, '')][0] ?? null, item.orientation === 'horizontal' ? 0.9 : 1.25, (dv.confidence ?? 0) / 100);
           }
+          // 清晰字的双引擎结果一致时不再重复识别；分歧字继续完整多裁剪投票。
+          if (hasStableWinner()) break;
         }
         let text: string | null = null;
         let best = -1;
@@ -105,9 +119,9 @@ const api: OcrWorkerAPI = {
           .sort((a, b) => b[1].score - a[1].score)
           .map(([candidate]) => candidate)
           .slice(0, 3);
-        out.push({ key: item.key, text, confidence, candidates });
+        out.push({ key: item.key, text, confidence, candidates, agreeingPasses: winner.count, totalPasses });
       } catch {
-        out.push({ key: item.key, text: null, confidence: 0, candidates: [] });
+        out.push({ key: item.key, text: null, confidence: 0, candidates: [], agreeingPasses: 0, totalPasses: 0 });
       }
     }
       return out;

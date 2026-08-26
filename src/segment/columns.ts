@@ -211,9 +211,122 @@ export function snapCharsToColumnCenters(chars: CharItem[], charSideRef?: number
   return [...byId.values()];
 }
 
+export interface RankLabelPair {
+  firstId: string;
+  secondId: string;
+}
+
+/**
+ * 检出成排出现的横向双字排行标签。至少需要同一水平带出现两组、且组间距明显大于组内字距，
+ * 以避免把普通横排正文误判为「長子/次子」标签。
+ */
+export function detectHandwrittenRankPairs(chars: CharItem[], charSideRef?: number): RankLabelPair[] {
+  if (chars.length < 4) return [];
+  const side = charSideRef ?? estimateCharSide(chars);
+  const eligible = chars.filter((char) => {
+    if (char.kind === 'side' || char.group === 'title' || char.group === 'pageno') return false;
+    const w = char.bbox[2] - char.bbox[0];
+    const h = char.bbox[3] - char.bbox[1];
+    return w >= side * 0.35 && h >= side * 0.35 && w <= side * 1.9 && h <= side * 1.9;
+  });
+  const rows: CharItem[][] = [];
+  for (const char of [...eligible].sort((a, b) => a.cy - b.cy || a.cx - b.cx)) {
+    const row = rows.find((items) => Math.abs(median(items.map((item) => item.cy)) - char.cy) <= side * 0.42);
+    if (row) row.push(char);
+    else rows.push([char]);
+  }
+
+  const detected: RankLabelPair[] = [];
+  for (const row of rows) {
+    if (row.length < 4) continue;
+    const sorted = [...row].sort((a, b) => a.cx - b.cx);
+    const pairs: Array<{ first: CharItem; second: CharItem; gap: number }> = [];
+    for (let index = 0; index + 1 < sorted.length;) {
+      const first = sorted[index];
+      const second = sorted[index + 1];
+      const gap = second.cx - first.cx;
+      if (gap >= side * 0.55 && gap <= side * 1.65) {
+        pairs.push({ first, second, gap });
+        index += 2;
+      } else {
+        index += 1;
+      }
+    }
+    if (pairs.length < 2) continue;
+    const innerGap = median(pairs.map((pair) => pair.gap));
+    const hasSeparatedGroups = pairs.slice(1).some((pair, index) => (
+      pair.first.cx - pairs[index].second.cx >= innerGap * 1.35
+    ));
+    if (!hasSeparatedGroups) continue;
+    for (const pair of pairs) detected.push({ firstId: pair.first.id, secondId: pair.second.id });
+  }
+  return detected;
+}
+
+function refineHandwrittenRankLabels(chars: CharItem[], charSideRef?: number): CharItem[] {
+  const pairs = detectHandwrittenRankPairs(chars, charSideRef);
+  if (pairs.length === 0) return chars;
+  const rankIds = new Set(pairs.flatMap((pair) => [pair.firstId, pair.secondId]));
+  const pairCenterY = new Map<string, number>();
+  const byId = new Map(chars.map((char) => [char.id, char]));
+  for (const pair of pairs) {
+    const first = byId.get(pair.firstId);
+    const second = byId.get(pair.secondId);
+    if (!first || !second) continue;
+    const centerY = (first.cy + second.cy) / 2;
+    pairCenterY.set(first.id, centerY);
+    pairCenterY.set(second.id, centerY);
+  }
+  return chars.map((char) => {
+    if (!rankIds.has(char.id)) return char;
+    const cy = pairCenterY.get(char.id) ?? char.cy;
+    const shiftY = cy - char.cy;
+    return {
+      ...char,
+      cy,
+      bbox: [char.bbox[0], char.bbox[1] + shiftY, char.bbox[2], char.bbox[3] + shiftY],
+      group: 'rank' as FontGroup,
+      kind: 'text' as CharKind,
+    };
+  });
+}
+/** 标记页面右侧、字号明显较大的稳定竖列为世次/祖先标题；只改变分组，不固定填字。 */
+function markRightEdgeTitleColumn(chars: CharItem[], pageWidth?: number): CharItem[] {
+  if (!pageWidth || chars.length < 6) return chars;
+  const bodyCandidates = chars.filter((char) => char.kind !== 'side' && char.group !== 'pageno');
+  if (bodyCandidates.length < 6) return chars;
+  const bodyHeight = median(bodyCandidates.map((char) => char.bbox[3] - char.bbox[1]));
+  const candidates = bodyCandidates.filter((char) => {
+    const w = char.bbox[2] - char.bbox[0];
+    const h = char.bbox[3] - char.bbox[1];
+    return char.cx >= pageWidth * 0.72 && h >= bodyHeight * 1.2 && w >= bodyHeight * 0.55;
+  });
+  if (candidates.length < 3) return chars;
+
+  const columns: CharItem[][] = [];
+  for (const char of [...candidates].sort((a, b) => b.cx - a.cx)) {
+    const column = columns.find((items) => Math.abs(median(items.map((item) => item.cx)) - char.cx) <= bodyHeight * 0.45);
+    if (column) column.push(char);
+    else columns.push([char]);
+  }
+  const titleColumn = columns
+    .filter((column) => column.length >= 3)
+    .filter((column) => {
+      const ordered = [...column].sort((a, b) => a.cy - b.cy);
+      const medH = median(ordered.map((char) => char.bbox[3] - char.bbox[1]));
+      const xSpread = Math.max(...ordered.map((char) => char.cx)) - Math.min(...ordered.map((char) => char.cx));
+      const gaps = ordered.slice(1).map((char, index) => char.cy - ordered[index].cy);
+      return xSpread <= medH * 0.45 && gaps.every((gap) => gap >= medH * 0.6 && gap <= medH * 2.4);
+    })
+    .sort((a, b) => median(b.map((char) => char.cx)) - median(a.map((char) => char.cx)))[0];
+  if (!titleColumn) return chars;
+  const ids = new Set(titleColumn.map((char) => char.id));
+  return chars.map((char) => ids.has(char.id) ? { ...char, group: 'title' as FontGroup, kind: 'text' as CharKind } : char);
+}
 export function applyColumnStructure(
   chars: CharItem[],
   charSideRef?: number,
+  pageWidth?: number,
 ): CharItem[] {
   const side = charSideRef ?? estimateCharSide(chars);
   const deduped = dedupeOverlappingChars(chars, side);
@@ -239,5 +352,6 @@ export function applyColumnStructure(
     }
   }
 
-  return sortCharsReadingOrder([...byId.values()], side);
+  const refined = refineHandwrittenRankLabels([...byId.values()], side);
+  return sortCharsReadingOrder(markRightEdgeTitleColumn(refined, pageWidth), side);
 }

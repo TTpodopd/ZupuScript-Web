@@ -1,15 +1,17 @@
 /**
- * 固定识别《倪氏宗譜》左侧书名栏。
- * 仅处理左侧区域；按 x 聚类、合并断裂碎片后固定填入四字。
+ * Legacy fixed-title detector kept for backwards-compatible project tests.
+ *
+ * The production analysis/recognition pipeline no longer calls this module:
+ * left-margin title boxes are now content-agnostic and are filled by OCR.
  */
 import { median } from '@/lib/utils';
 import type { CharItem } from '@/model/types';
 
+/** @deprecated Only retained for importing old project fixtures. */
 export const FIXED_BOOK_TITLE = '倪氏宗譜';
 
 export interface FixedTitleResult {
   assignments: Map<string, string>;
-  /** 仅含四个书名字符组的主框/碎片框，不包含下方页码与书签。 */
   consumedIds: Set<string>;
   titleRegion?: [number, number, number, number];
 }
@@ -30,8 +32,7 @@ function clusterByX(chars: CharItem[], gapPx: number): CharItem[][] {
   const clusters: CharItem[][] = sorted.length ? [[sorted[0]]] : [];
   for (let i = 1; i < sorted.length; i += 1) {
     const last = clusters[clusters.length - 1];
-    const refX = median(last.map((c) => c.cx));
-    if (sorted[i].cx - refX <= gapPx) last.push(sorted[i]);
+    if (sorted[i].cx - median(last.map((c) => c.cx)) <= gapPx) last.push(sorted[i]);
     else clusters.push([sorted[i]]);
   }
   return clusters;
@@ -55,74 +56,55 @@ function groupFragments(col: CharItem[], colMedH: number): CharGroup[] {
   });
 }
 
+/** @deprecated Production code intentionally does not use this sample-specific detector. */
 export function resolveFixedBookTitle(chars: CharItem[], width: number): FixedTitleResult {
   const glyphs = [...FIXED_BOOK_TITLE];
-  const empty = (): FixedTitleResult => ({ assignments: new Map(), consumedIds: new Set() });
   const left = chars.filter((c) => c.cx < width * 0.4);
-  const describe = (clusters: CharItem[][], picked: CharGroup[], reason: string) => {
-    lastDebug = {
-      leftCount: left.length,
-      clusterCount: clusters.length,
-      clusters: clusters.map((c) => ({
-        cx: Math.round(median(c.map((x) => x.cx))),
-        count: c.length,
-        medH: Math.round(median(c.map((x) => x.bbox[3] - x.bbox[1]))),
-      })),
-      picked: picked.map((g) => ({
-        id: g.members[0].id,
-        cx: Math.round(g.members[0].cx),
-        cy: Math.round(g.cy),
-        h: Math.round(g.h),
-      })),
-      reason,
-    };
+  const empty = (reason: string): FixedTitleResult => {
+    lastDebug = { leftCount: left.length, clusterCount: 0, clusters: [], picked: [], reason };
+    return { assignments: new Map(), consumedIds: new Set() };
   };
+  if (left.length < glyphs.length) return empty('左侧字框不足 4 个');
 
-  if (left.length < glyphs.length) {
-    describe([], [], '左侧字框不足 4 个');
-    return empty();
-  }
   const gapPx = Math.max(24, median(left.map((c) => c.bbox[3] - c.bbox[1])) * 1.2);
   const clusters = clusterByX(left, gapPx);
   const ranked = clusters
     .map((col) => ({ col, medH: median(col.map((c) => c.bbox[3] - c.bbox[1])) }))
     .sort((a, b) => b.medH - a.medH);
-
   for (const { col, medH } of ranked) {
-    const solid = col.filter((c) => c.bbox[3] - c.bbox[1] >= medH * 0.5);
-    const groups = groupFragments(solid, medH);
+    const groups = groupFragments(col, medH);
     if (groups.length < glyphs.length) continue;
     const top = groups.slice(0, glyphs.length);
     const heights = top.map((g) => g.h);
     const topMedH = median(heights);
-    const colIds = new Set(col.map((c) => c.id));
-    const otherHeights = chars.filter((c) => !colIds.has(c.id)).map((c) => c.bbox[3] - c.bbox[1]);
-    if (otherHeights.length && topMedH < median(otherHeights) * 1.12) continue;
     if (heights.some((h) => h < topMedH * 0.55 || h > topMedH * 1.6)) continue;
     if (top.slice(1).some((g, i) => g.cy - top[i].cy < topMedH * 0.7 || g.cy - top[i].cy > topMedH * 3.5)) continue;
-
     const assignments = new Map<string, string>();
     const consumedIds = new Set<string>();
-    top.forEach((group, index) => {
-      group.members.forEach((member, memberIndex) => {
-        if (memberIndex === 0) assignments.set(member.id, glyphs[index]);
-        consumedIds.add(member.id);
-      });
-    });
-    const regionPad = topMedH * 0.35;
+    top.forEach((group, index) => group.members.forEach((member, memberIndex) => {
+      if (memberIndex === 0) assignments.set(member.id, glyphs[index]);
+      consumedIds.add(member.id);
+    }));
+    const pad = topMedH * 0.35;
     const titleRegion: [number, number, number, number] = [
-      Math.min(...top.flatMap((g) => g.members.map((m) => m.bbox[0]))) - regionPad,
-      Math.min(...top.flatMap((g) => g.members.map((m) => m.bbox[1]))) - regionPad,
-      Math.max(...top.flatMap((g) => g.members.map((m) => m.bbox[2]))) + regionPad,
-      Math.max(...top.flatMap((g) => g.members.map((m) => m.bbox[3]))) + regionPad,
+      Math.min(...top.flatMap((g) => g.members.map((m) => m.bbox[0]))) - pad,
+      Math.min(...top.flatMap((g) => g.members.map((m) => m.bbox[1]))) - pad,
+      Math.max(...top.flatMap((g) => g.members.map((m) => m.bbox[2]))) + pad,
+      Math.max(...top.flatMap((g) => g.members.map((m) => m.bbox[3]))) + pad,
     ];
-    describe(clusters, top, '命中');
+    lastDebug = {
+      leftCount: left.length,
+      clusterCount: clusters.length,
+      clusters: clusters.map((c) => ({ cx: Math.round(median(c.map((x) => x.cx))), count: c.length, medH: Math.round(median(c.map((x) => x.bbox[3] - x.bbox[1]))) })),
+      picked: top.map((g) => ({ id: g.members[0].id, cx: Math.round(g.members[0].cx), cy: Math.round(g.cy), h: Math.round(g.h) })),
+      reason: '命中（仅兼容旧测试）',
+    };
     return { assignments, consumedIds, titleRegion };
   }
-  describe(clusters, [], '未找到大字书名栏');
-  return empty();
+  return empty('未找到兼容旧测试的固定标题列');
 }
 
+/** @deprecated Use content-agnostic margin boxes plus OCR in production. */
 export function collectFixedBookTitle(chars: CharItem[], width: number): Map<string, string> {
   return resolveFixedBookTitle(chars, width).assignments;
 }

@@ -34,12 +34,68 @@ import {
   getExportablePages,
   type ExportMode,
 } from '@/export/exportModes';
-import { uuid, pagesForBatchProcessing } from '@/lib/utils';
-import { currentRecognitionSettingsKey } from '@/recognize/buildConfig';
+import { uuid } from '@/lib/utils';
 import LowConfPanel, { useLowConfChars } from './LowConfPanel';
 import ProofreadCanvas from './ProofreadCanvas';
 import { drawSelectionOverlay, computeFitCenterTransform, setCharsBboxSize } from '@/ui/canvasOverlay';
 
+type Point = { x: number; y: number };
+type RectBounds = { left: number; top: number; right: number; bottom: number };
+
+function rectsOverlap(a: RectBounds, b: RectBounds): boolean {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+/** 在已有字符之间寻找可完整容纳新增姓名的空白位置。 */
+function findEmptyNamePosition(
+  page: Page,
+  glyphCount: number,
+  orientation: 'v' | 'h',
+  boxSize: number,
+  step: number,
+): Point | null {
+  const edgePadding = Math.max(8, boxSize * 0.4);
+  const charPadding = Math.max(6, boxSize * 0.3);
+  const nameWidth = orientation === 'h' ? boxSize + step * (glyphCount - 1) : boxSize;
+  const nameHeight = orientation === 'v' ? boxSize + step * (glyphCount - 1) : boxSize;
+  const minX = edgePadding + nameWidth / 2;
+  const maxX = page.source.widthPx - edgePadding - nameWidth / 2;
+  const minY = edgePadding + nameHeight / 2;
+  const maxY = page.source.heightPx - edgePadding - nameHeight / 2;
+  if (minX > maxX || minY > maxY) return null;
+
+  const occupied = page.chars.map((char) => ({
+    left: char.bbox[0] - charPadding,
+    top: char.bbox[1] - charPadding,
+    right: char.bbox[2] + charPadding,
+    bottom: char.bbox[3] + charPadding,
+  }));
+  const scanStep = Math.max(8, Math.min(boxSize / 2, 24));
+  const centerX = page.source.widthPx / 2;
+  const centerY = page.source.heightPx / 2;
+  const candidates: Array<Point & { distance: number }> = [];
+
+  for (let y = minY; y <= maxY + 0.01; y += scanStep) {
+    for (let x = minX; x <= maxX + 0.01; x += scanStep) {
+      const bounds = {
+        left: x - nameWidth / 2,
+        top: y - nameHeight / 2,
+        right: x + nameWidth / 2,
+        bottom: y + nameHeight / 2,
+      };
+      if (occupied.some((rect) => rectsOverlap(bounds, rect))) continue;
+      candidates.push({ x, y, distance: Math.hypot(x - centerX, y - centerY) });
+    }
+  }
+
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => a.distance - b.distance);
+  const best = candidates[0];
+  return {
+    x: best.x - (orientation === 'h' ? step * (glyphCount - 1) / 2 : 0),
+    y: best.y - (orientation === 'v' ? step * (glyphCount - 1) / 2 : 0),
+  };
+}
 /** 左侧原图画布：与右侧共享 transform，同步显示选区（F6.1） */
 function OriginalCanvas({ page, focusCharId = null }: { page: Page; focusCharId?: string | null }) {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -234,10 +290,6 @@ export default function EditorPage() {
   const page: Page | undefined = pages.find((p) => p.id === currentPageId) ?? pages[0];
   const project = currentProject();
   const exportModes = availableExportModes(pages);
-  const pagesNeedRerun = useMemo(
-    () => pagesForBatchProcessing(pages, currentRecognitionSettingsKey()),
-    [pages],
-  );
   const {
     overlayMode,
     setOverlayMode,
@@ -278,7 +330,7 @@ export default function EditorPage() {
   const [exportMode, setExportMode] = useState<ExportMode>(() => defaultExportMode(pages));
   const [clipboard, setClipboard] = useState<CanvasClipboard | null>(null);
   const [showAddName, setShowAddName] = useState(false);
-  const [nameDraft, setNameDraft] = useState<NameDraft>({ text: '', orientation: 'v', pt: 12, spacing: 1.25 });
+  const [nameDraft, setNameDraft] = useState<NameDraft>({ text: '', orientation: 'v', pt: 12, spacing: 1 });
   const [showExportPreview, setShowExportPreview] = useState(false);
   const [previewGeneration, setPreviewGeneration] = useState(0);
   const previewGenRef = useRef(0);
@@ -641,48 +693,43 @@ export default function EditorPage() {
     if (sample) setSelectionPt(String(sample));
   };
 
+  const bodyCharMetrics = () => {
+    const bodyChars = page.chars.filter((char) => char.group === 'body');
+    const source = bodyChars.length > 0 ? bodyChars : page.chars;
+    const median = (values: number[], fallback: number) => {
+      const valid = values.filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
+      if (valid.length === 0) return fallback;
+      const middle = Math.floor(valid.length / 2);
+      return valid.length % 2 === 0 ? (valid[middle - 1] + valid[middle]) / 2 : valid[middle];
+    };
+    const pt = median(source.map((char) => char.pt), page.fontSizes.body || 12);
+    const pxPerMm = page.calibration.pxPerMm > 0 ? page.calibration.pxPerMm : page.source.dpi / 25.4 || 10;
+    const fallbackHeight = Math.max(18, ptToPx(pt, pxPerMm) * 1.08);
+    const boxHeight = median(source.map((char) => char.bbox[3] - char.bbox[1]), fallbackHeight);
+    return { pt, boxHeight };
+  };
+
   const openAddNameDialog = () => {
-    setNameDraft((draft) => ({ ...draft, text: '', pt: page.fontSizes.body || draft.pt || 12 }));
+    const metrics = bodyCharMetrics();
+    setNameDraft((draft) => ({ ...draft, text: '', pt: metrics.pt, spacing: 1 }));
     setShowAddName(true);
   };
 
   const addPersonName = () => {
     const glyphs = Array.from(nameDraft.text.replace(/\s+/g, ''));
     if (glyphs.length === 0) return;
-    const pxPerMm = page.calibration.pxPerMm > 0 ? page.calibration.pxPerMm : page.source.dpi / 25.4 || 10;
-    const fontPx = Math.max(12, ptToPx(nameDraft.pt, pxPerMm));
-    const boxSize = Math.max(18, fontPx * 1.08);
-    const step = Math.max(boxSize, fontPx * nameDraft.spacing);
+    const metrics = bodyCharMetrics();
+    const ptScale = metrics.pt > 0 ? nameDraft.pt / metrics.pt : 1;
+    const boxSize = Math.max(6, metrics.boxHeight * ptScale);
+    const step = boxSize * Math.max(0.8, nameDraft.spacing);
 
-    let anchorX = page.source.widthPx / 2;
-    let anchorY = page.source.heightPx / 2;
-    const selectedChar = page.chars.find((char) => char.id === selectedCharIds[0]);
-    const selectedLine = page.treeLines.find((line) => line.id === selectedLineIds[0]);
-    const selectedNode = page.treeNodes.find((node) => node.id === selectedNodeIds[0]);
-    const selectedRect = [...page.borderRects, ...page.tagRects].find((rect) => rect.id === selectedRectIds[0]);
-    if (selectedChar) {
-      anchorX = selectedChar.cx + boxSize * 1.4;
-      anchorY = selectedChar.cy;
-    } else if (selectedNode) {
-      anchorX = selectedNode.cx;
-      anchorY = selectedNode.cy + selectedNode.r + boxSize;
-    } else if (selectedLine) {
-      anchorX = (selectedLine.x1 + selectedLine.x2) / 2;
-      anchorY = Math.max(selectedLine.y1, selectedLine.y2) + boxSize;
-    } else if (selectedRect) {
-      anchorX = selectedRect.x + selectedRect.w / 2;
-      anchorY = selectedRect.y + selectedRect.h + boxSize;
+    const emptyPosition = findEmptyNamePosition(page, glyphs.length, nameDraft.orientation, boxSize, step);
+    if (!emptyPosition) {
+      showActionHint('当前页面没有足够的空白区域，请先移动部分字符后再新增人名');
+      return;
     }
-
+    const { x: anchorX, y: anchorY } = emptyPosition;
     const half = boxSize / 2;
-    const totalSpan = step * (glyphs.length - 1);
-    if (nameDraft.orientation === 'v') {
-      anchorX = Math.max(half + 4, Math.min(page.source.widthPx - half - 4, anchorX));
-      anchorY = Math.max(half + 4, Math.min(page.source.heightPx - half - 4 - totalSpan, anchorY));
-    } else {
-      anchorX = Math.max(half + 4, Math.min(page.source.widthPx - half - 4 - totalSpan, anchorX));
-      anchorY = Math.max(half + 4, Math.min(page.source.heightPx - half - 4, anchorY));
-    }
 
     const chars: CharItem[] = glyphs.map((text, index) => {
       const cx = anchorX + (nameDraft.orientation === 'h' ? index * step : 0);
@@ -704,6 +751,7 @@ export default function EditorPage() {
     });
     apply({ type: 'char.addMany', chars });
     setSelection(chars.map((char) => char.id));
+    showActionHint('已在空白区域添加人名，可直接拖动调整位置');
     setShowAddName(false);
     setNameDraft((draft) => ({ ...draft, text: '' }));
   };
@@ -739,28 +787,18 @@ export default function EditorPage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      {pagesNeedRerun.length > 0 && (
-        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
-          <span>
-            检测到 {pagesNeedRerun.length} 页识别结果不完整（识别算法已更新），建议重新识别以填充空字。
-          </span>
-          <Button size="sm" variant="secondary" onClick={() => setView('analyze')}>
-            重新识别
-          </Button>
-        </div>
-      )}
       <div className="relative z-20 shrink-0 border-b bg-card shadow-soft">
-        <div className="flex flex-nowrap items-center gap-2 overflow-x-auto px-3 py-2.5">
+        <div className="flex flex-nowrap items-center gap-3 overflow-x-auto px-3 py-2">
           <Select
             value={page.id}
             onChange={(e) => setCurrentPage(e.target.value)}
             onFocus={() => showActionHint('切换当前正在编辑的页面')}
             options={pages.map((p) => ({ value: p.id, label: `#${p.index + 1} ${p.source.name}` }))}
-            className="w-52"
+            className="h-8 w-52 text-xs"
             aria-label="选择页面"
           />
           <span className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
-          <div className="flex items-center gap-1" aria-label="编辑操作">
+          <div className="flex h-9 items-center gap-1 rounded-lg border border-border/70 bg-muted/20 p-0.5" aria-label="编辑操作">
             <Button
               size="sm"
               variant="outline"
@@ -769,6 +807,8 @@ export default function EditorPage() {
                 undo();
               }}
               disabled={!canUndo()}
+              className="h-8 w-8 p-0"
+              title="撤销"
               aria-label="撤销"
             >
               <Undo2 className="h-4 w-4" />
@@ -781,6 +821,8 @@ export default function EditorPage() {
                 redo();
               }}
               disabled={!canRedo()}
+              className="h-8 w-8 p-0"
+              title="重做"
               aria-label="重做"
             >
               <Redo2 className="h-4 w-4" />
@@ -793,6 +835,8 @@ export default function EditorPage() {
                 copySelection();
               }}
               disabled={!hasSelection}
+              className="h-8 w-8 p-0"
+              title="复制"
               aria-label="复制"
             >
               <Copy className="h-4 w-4" />
@@ -805,6 +849,8 @@ export default function EditorPage() {
                 pasteSelection();
               }}
               disabled={!clipboard}
+              className="h-8 w-8 p-0"
+              title="粘贴"
               aria-label="粘贴"
             >
               <ClipboardPaste className="h-4 w-4" />
@@ -816,6 +862,7 @@ export default function EditorPage() {
                 showActionHint('批量添加竖排或横排人名，生成多个可编辑字符');
                 openAddNameDialog();
               }}
+              className="h-8 px-2.5"
               aria-label="新增人名"
             >
               <UserRoundPlus className="h-4 w-4" />
@@ -823,8 +870,9 @@ export default function EditorPage() {
             </Button>
           </div>
           <span className="hidden h-6 w-px bg-border md:block" aria-hidden="true" />
+          <div className="flex h-9 items-center gap-1 rounded-lg border border-border/70 bg-muted/20 p-0.5" aria-label="视图工具">
           <Select
-            value={overlayMode}
+              value={overlayMode}
             onChange={(e) => {
               const mode = e.target.value as 'split' | 'overlay';
               setOverlayMode(mode);
@@ -845,7 +893,7 @@ export default function EditorPage() {
               { value: 'split', label: '原图 / 结果' },
               { value: 'overlay', label: '差异核对' },
             ]}
-            className="w-32"
+            className="h-8 w-32 border-0 bg-transparent text-xs shadow-none"
             aria-label="显示模式"
           />
           {overlayMode === 'overlay' && (
@@ -890,7 +938,9 @@ export default function EditorPage() {
           >
             标尺
           </Button>
+          </div>
           <div className="flex-1" />
+          <div className="flex h-9 items-center gap-1 rounded-lg border border-border/70 bg-muted/20 p-0.5" aria-label="导出工具">
           {exportModes.length > 0 && (
             <Select
               value={exportMode}
@@ -901,7 +951,7 @@ export default function EditorPage() {
               }}
               onFocus={() => showActionHint(exportModeDescription(exportMode, exportablePages.length))}
               options={exportModes.map((mode) => ({ value: mode, label: exportModeLabel(mode) }))}
-              className="w-40"
+              className="h-8 w-36 border-0 bg-transparent text-xs shadow-none"
               aria-label="导出模式"
             />
           )}
@@ -941,6 +991,7 @@ export default function EditorPage() {
             <Eye className="h-4 w-4" />
             预览
           </Button>
+          </div>
         </div>
         <div className="flex min-h-9 flex-wrap items-center gap-x-3 gap-y-1 border-t bg-muted/15 px-3 py-2 text-xs leading-normal text-muted-foreground">
           <span>已编辑 <strong className="font-medium text-foreground">{page.chars.filter((c) => c.edited).length}</strong></span>
@@ -951,13 +1002,44 @@ export default function EditorPage() {
           </span>
           <span className="hidden sm:inline">·</span>
           <span>已选 <strong className="font-medium text-foreground">{selectedCharIds.length + selectedLineIds.length + selectedNodeIds.length + selectedRectIds.length}</strong> 个元素</span>
-          {actionHint && (
-            <>
-              <span className="hidden md:inline">·</span>
-              <span className="min-w-0 flex-1 text-foreground">{actionHint}</span>
-            </>
+          {page.chars.length > 0 && (
+            <label className="flex items-center gap-1 border-l pl-3 text-foreground">
+              <span className="whitespace-nowrap">本页字号</span>
+              <Input
+                type="number"
+                step={0.5}
+                min={0.5}
+                value={globalPtHint || page.fontSizes.rank || page.fontSizes.body}
+                onChange={(e) => setGlobalFontSize(e.target.value)}
+                className="h-7 w-16 px-2 text-xs"
+                aria-label="本页主文字字号 pt"
+              />
+              <span className="text-muted-foreground">pt</span>
+            </label>
           )}
-          {canvasExportMessage && <span className="text-primary">{canvasExportMessage}</span>}
+          {selectedCharIds.length > 0 && (
+            <label className="flex items-center gap-1 text-foreground">
+              <span className="whitespace-nowrap">选区字号</span>
+              <Input
+                type="number"
+                step={0.5}
+                min={0.5}
+                value={selectionPt}
+                onChange={(e) => handleSelectionPtChange(e.target.value)}
+                className="h-7 w-16 px-2 text-xs"
+                aria-label="选中区域字号 pt"
+              />
+              <span className="text-muted-foreground">pt</span>
+            </label>
+          )}
+          <div className="ml-auto min-w-0 flex-1 text-right">
+            {actionHint && (
+              <span className="block truncate text-foreground" title={actionHint}>{actionHint}</span>
+            )}
+            {canvasExportMessage && (
+              <span className="block truncate text-primary" title={canvasExportMessage}>{canvasExportMessage}</span>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1003,109 +1085,56 @@ export default function EditorPage() {
               onPointerCancel={endLowConfResize}
             />
             <div className="flex min-h-0 shrink-0 flex-col overflow-hidden border-l bg-[#f7f5f1]" style={{ width: lowConfWidth }}>
-              <section className="shrink-0 border-b-2 border-stone-300/80">
-                <header className="border-b border-stone-200/90 bg-stone-100/90 px-3 py-2 text-xs font-semibold text-stone-800">
-                  字号调整
-                </header>
-                <div className="space-y-2 px-3 py-2.5 text-xs text-stone-600">
-                  {page.chars.length === 0 ? (
-                    <p>本页尚无识别字符，请先完成深度识别。</p>
-                  ) : (
-                    <>
-                      <p className="leading-snug">统一调整本页全部文字（共 {page.chars.length} 字），修改后立即生效。</p>
-                      <div className="flex items-center gap-2 rounded-md border border-stone-200/90 bg-white/70 px-2.5 py-2">
-                        <Label className="shrink-0 text-xs font-medium text-stone-700">主文字</Label>
-                        <Input
-                          type="number"
-                          step={0.5}
-                          min={0.5}
-                          value={globalPtHint || page.fontSizes.rank || page.fontSizes.body}
-                          onChange={(e) => setGlobalFontSize(e.target.value)}
-                          className="h-8 w-[4.5rem] text-xs"
-                          aria-label="主文字字号"
-                        />
-                        <span className="text-xs text-stone-500">pt</span>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </section>
-
               {selectedCharIds.length > 0 && (
-                <section className="shrink-0 border-b-2 border-stone-300/80">
-                  <header className="border-b border-stone-200/90 bg-stone-100/90 px-3 py-2 text-xs font-semibold text-stone-800">
-                    选中区域（{selectedCharIds.length} 字）
-                  </header>
-                  <div className="space-y-2 px-3 py-2.5 text-xs text-stone-600">
-                    <p className="leading-snug">Ctrl+点选或框选多个字符，调整字号或定位框尺寸；画布上可拖拽蓝框边角缩放。</p>
-                    <div className="flex items-center gap-2 rounded-md border border-stone-200/90 bg-white/70 px-2.5 py-2">
-                      <Label className="shrink-0 text-xs font-medium text-stone-700">字号</Label>
-                      <Input
-                        type="number"
-                        step={0.5}
-                        min={0.5}
-                        value={selectionPt}
-                        onChange={(e) => handleSelectionPtChange(e.target.value)}
-                        className="h-8 w-[4.5rem] text-xs"
-                        aria-label="选中区域字号 pt"
-                      />
-                      <span className="text-xs text-stone-500">pt</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="flex items-center gap-1.5 rounded-md border border-stone-200/90 bg-white/70 px-2 py-2">
-                        <Label className="shrink-0 text-xs font-medium text-stone-700">框宽</Label>
+                <details className="group hidden shrink-0 border-b border-stone-300/80">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-2 bg-stone-100/90 px-3 py-2 text-xs font-semibold text-stone-800 marker:content-none">
+                    <span>选中区域定位（{selectedCharIds.length} 字）</span>
+                    <span className="font-normal tabular-nums text-stone-500">
+                      {selectionBoxW}×{selectionBoxH} px
+                      <span className="ml-2 inline-block transition-transform group-open:rotate-180">⌄</span>
+                    </span>
+                  </summary>
+                  <div className="space-y-2 px-3 py-2 text-xs text-stone-600">
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <label className="min-w-0 rounded-md border border-stone-200/90 bg-white/70 px-2 py-1">
+                        <span className="block text-[11px] text-stone-500">框宽 px</span>
                         <Input
                           type="number"
                           step={1}
                           min={6}
                           value={selectionBoxW}
                           onChange={(e) => handleSelectionBoxWChange(e.target.value)}
-                          className="h-8 min-w-0 flex-1 text-xs"
+                          className="h-7 w-full min-w-0 border-0 bg-transparent px-0 text-xs shadow-none"
                           aria-label="定位框宽度 px"
                         />
-                        <span className="text-xs text-stone-500">px</span>
-                      </div>
-                      <div className="flex items-center gap-1.5 rounded-md border border-stone-200/90 bg-white/70 px-2 py-2">
-                        <Label className="shrink-0 text-xs font-medium text-stone-700">框高</Label>
+                      </label>
+                      <label className="min-w-0 rounded-md border border-stone-200/90 bg-white/70 px-2 py-1">
+                        <span className="block text-[11px] text-stone-500">框高 px</span>
                         <Input
                           type="number"
                           step={1}
                           min={6}
                           value={selectionBoxH}
                           onChange={(e) => handleSelectionBoxHChange(e.target.value)}
-                          className="h-8 min-w-0 flex-1 text-xs"
+                          className="h-7 w-full min-w-0 border-0 bg-transparent px-0 text-xs shadow-none"
                           aria-label="定位框高度 px"
                         />
-                        <span className="text-xs text-stone-500">px</span>
-                      </div>
+                      </label>
                     </div>
                     {selectedCharIds.length > 1 && (
                       <Button
                         size="sm"
                         variant="outline"
-                        className="h-8 w-full border-stone-200/90 bg-white/70 text-xs text-stone-700"
+                        className="h-7 w-full border-stone-200/90 bg-white/70 px-2 text-[11px] text-stone-700"
                         onClick={unifySelectionBbox}
+                        title="统一选中字符的定位框尺寸"
                       >
-                        统一框尺寸
+                        统一定位框尺寸
                       </Button>
                     )}
-                    <div className="grid grid-cols-4 gap-1.5">
-                      {[0.75, 0.85, 0.9, 1.1].map((factor) => (
-                        <Button
-                          key={factor}
-                          size="sm"
-                          variant="outline"
-                          className="h-8 border-stone-200/90 bg-white/70 px-0 text-xs text-stone-700"
-                          onClick={() => scaleSelectionPt(factor)}
-                        >
-                          ×{factor}
-                        </Button>
-                      ))}
-                    </div>
                   </div>
-                </section>
+                </details>
               )}
-
               <div className="min-h-0 flex-1 overflow-hidden">
                 <LowConfPanel page={page} />
               </div>
@@ -1211,7 +1240,7 @@ export default function EditorPage() {
                   max={3}
                   step={0.05}
                   value={nameDraft.spacing}
-                  onChange={(e) => setNameDraft({ ...nameDraft, spacing: parseFloat(e.target.value) || 1.25 })}
+                  onChange={(e) => setNameDraft({ ...nameDraft, spacing: parseFloat(e.target.value) || 1 })}
                 />
               </div>
             </div>

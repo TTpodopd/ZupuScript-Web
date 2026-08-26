@@ -1,5 +1,5 @@
 import { check, eq, section, summary } from './helpers.mjs';
-import { detectRects, detectTreeLines } from '../src/layout/detect.ts';
+import { detectRects, detectTreeLines, partitionTextOccludingTreeLines } from '../src/layout/detect.ts';
 import { isSolidGraphicBlock, isTextLikeBlock } from '../src/layout/graphicBlock.ts';
 import { detectNodes } from '../src/layout/nodes.ts';
 
@@ -133,5 +133,22 @@ const solidBin = new Uint8Array(120 * 400);
 block(solidBin, 120, 35, 40, 50, 180);
 check('竖排文字列不应判为装饰块', isTextLikeBlock(textColBin, 120, 400, { x: 30, y: 20, w: 60, h: 360 }));
 check('实心书标块应判为装饰图形', isSolidGraphicBlock(solidBin, 120, 400, { x: 30, y: 35, w: 55, h: 190 }));
+
+section('文字遮挡短线清理');
+const textChar = {
+  id: 'char', text: null, cx: 112, cy: 112, bbox: [100, 100, 124, 124], pt: 0,
+  conf: 0, note: 'empty', source: 'manual', edited: false, group: 'body', kind: 'text',
+};
+const occludingLine = { id: 'noise', x1: 102, y1: 112, x2: 122, y2: 112, widthPx: 2, orientation: 'h' };
+const backbone = { id: 'backbone', x1: 40, y1: 70, x2: 220, y2: 70, widthPx: 2, orientation: 'h' };
+const branch = { id: 'branch', x1: 112, y1: 70, x2: 112, y2: 100, widthPx: 2, orientation: 'v' };
+const withNode = { id: 'node-branch', x1: 190, y1: 80, x2: 190, y2: 112, widthPx: 2, orientation: 'v' };
+const partition = partitionTextOccludingTreeLines(
+  [occludingLine, backbone, branch, withNode], [textChar],
+  [{ id: 'node', cx: 190, cy: 112, r: 5, strokePx: 2 }],
+);
+eq('穿过文字的短噪声线移除', partition.occluding.map((line) => line.id).join(','), 'noise');
+check('主干与分支线保留', partition.kept.some((line) => line.id === 'backbone') && partition.kept.some((line) => line.id === 'branch'));
+check('连接节点的短分支保留', partition.kept.some((line) => line.id === 'node-branch'));
 
 summary('layout detect pdf');

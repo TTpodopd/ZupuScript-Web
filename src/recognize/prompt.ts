@@ -16,7 +16,7 @@ const SURNAMES_TOP100 = SURNAMES.slice(0, 100).join('、');
 const GENEALOGY_PRIOR = GENEALOGY_TERMS.slice(0, 80).join('、');
 
 /** 修改提示词或识别规则时升级，防止复用旧模型缓存。 */
-export const RECOGNITION_PROMPT_VERSION = 'genealogy-ocr-v12';
+export const RECOGNITION_PROMPT_VERSION = 'genealogy-ocr-v17';
 export const LAYOUT_BORDER_PROMPT_VERSION = 'border-layout-v1';
 
 export const LAYOUT_BORDER_SYSTEM_PROMPT = [
@@ -179,7 +179,7 @@ export const SYSTEM_PROMPT = [
 ].join('\n');
 
 /** B 模式用户提示词（随网格尺寸动态生成） */
-export function buildGridUserPrompt(cols: number, rows: number, count: number, draft: GridPromptDraft[] = [], pageNumberIds: number[] = []): string {
+export function buildGridUserPrompt(cols: number, rows: number, count: number, draft: GridPromptDraft[] = [], pageNumberIds: number[] = [], rankIds: number[] = [], titleIds: number[] = [], marginTitleIds: number[] = [], marginTitleHint?: string): string {
   const parts = [
     `附件是 ${cols}x${rows} 编号字符网格，共 ${count} 格。每格白底黑字，左上角红色数字是 id，不是待识别文字。`,
     '编号已随机打乱，与族谱阅读顺序、人物关系和上下文无关。必须按红色 id 逐格独立识别。',
@@ -189,6 +189,19 @@ export function buildGridUserPrompt(cols: number, rows: number, count: number, d
   ];
   if (pageNumberIds.length > 0) {
     parts.push(`页码专用提示：编号 ${pageNumberIds.join('、')} 来自左下竖排页码区，通常是汉字数字「一二三四五六七八九十」之一。必须依据该格真实字形识别，不得固定猜测，也不得返回阿拉伯数字。`);
+  }
+  if (rankIds.length > 0) {
+    parts.push(`手写排行标签提示：编号 ${rankIds.join('、')} 来自横向双字排行标签区域，常见完整词为「長子、次子、三子、四子、五子、六子」。这些字可能是潦草手写体；请重点核对「長/次/三/四/五/六」与「子」的关键笔画，但仍须以每格真实字形为准，不清晰时返回候选而非猜测。`);
+  }
+  if (titleIds.length > 0) {
+    parts.push(`右侧大字标题提示：编号 ${titleIds.join('、')} 经版面几何确认来自页面右侧的大字竖列，常见内容为世次或祖先标题（例如「三世祖」）。请按每格真实笔画逐字识别；该例仅说明版面类型，不得固定照填，不清晰时返回候选或 null。`);
+  }
+  if (marginTitleIds.length > 0) {
+    if (marginTitleHint) {
+      parts.push(`左页边书名提示：编号 ${marginTitleIds.join('、')} 来自左外框外的竖排书名。本项目书名经共识确认为「${marginTitleHint}」；请逐格核对笔画后识别，字形明显不符时以图像为准。`);
+    } else {
+      parts.push(`左页边书名提示：编号 ${marginTitleIds.join('、')} 来自左外框外的竖排书名（常见二至四字，如「×氏宗譜」格式）。必须逐格依据真实笔画识别，严禁套用任何固定书名；不清晰时返回候选或 null。`);
+    }
   }
   if (draft.length > 0) {
     parts.push(
@@ -200,13 +213,13 @@ export function buildGridUserPrompt(cols: number, rows: number, count: number, d
   return parts.join('\n');
 }
 
-/** 二次综合校验提示：模型必须重新看图，并审查初次输出。 */
-export function buildReviewPrompt(draft: string, count: number): string {
+/** 复核提示：第二、三轮都必须重新看图，不得照抄此前草稿。 */
+export function buildReviewPrompt(draft: string, count: number, round = 2): string {
   return [
-    `这是同一张编号字符图，共 ${count} 格。下面是第一次识别的 JSON 草稿：`,
+    `这是同一张编号字符图，共 ${count} 格。现在进行第 ${round} 次独立核验；下面是此前识别的 JSON 草稿：`,
     draft,
     '不要照抄草稿。请逐格重新放大观察，按部件结构、关键笔画、封闭区域、断笔和粘连情况独立复核。',
-    '重点检查第一次输出中的 null、低置信、形近字、简繁误写和异体字规范化错误。',
+    '重点检查此前输出中的 null、低置信、形近字、简繁误写、异体字规范化错误，以及文字是否被填到相邻编号格。',
     '只在附件有明确字形证据时修正；不确定必须返回 char=null、confidence<0.60，并保留 1-3 个 candidates。',
     '输出完整 items 数组，id 必须覆盖每个格子且顺序可任意；不要输出解释文字。',
   ].join('\n');
@@ -236,6 +249,7 @@ export const PAGE_USER_PROMPT = [
   '必须覆盖姓名、排行、称谓、配偶、生卒葬信息、旁注和节点附近小字；不得只识别大字或主干姓名。',
   '严格区分文字与外框、谱系连接线、圆形节点、装饰块、箭头、污点和破损痕迹，这些图形不得生成字符。',
   '逐字保留繁体、异体和俗体原字形。字形不清时返回 null 和低置信度，不得根据亲属关系或常见姓名补全。',
+  '右侧大字竖列常为世次或祖先标题（如「三世祖」）；横排「長子/次子/三子」是排行标签。两类文字都必须逐锚点识别，不能串位。',
   'char 只允许汉字（含异体、扩展区）；字母、数字、标点、箭头等符号一律不得输出，对应 char=null。',
   '完成后进行覆盖检查：检查顶部、底部、左右侧栏和各谱系分支是否漏字；检查是否有重复坐标或虚构字符。',
   '输出完整 JSON，禁止解释。',
@@ -246,6 +260,7 @@ export function buildPageAnchoredUserPrompt(
   chars: Array<{ cx: number; cy: number; kind?: string; group?: string; skipAnchor?: boolean }>,
   widthPx: number,
   heightPx: number,
+  marginTitleHint?: string,
 ): string {
   const anchors = chars
     .map((c, id) => ({
@@ -253,7 +268,15 @@ export function buildPageAnchoredUserPrompt(
       rx: Math.round((c.cx / widthPx) * 10000) / 10000,
       ry: Math.round((c.cy / heightPx) * 10000) / 10000,
       skip: Boolean(c.skipAnchor),
-      ...(c.kind === 'side' ? { region: 'margin' as const, group: c.group ?? 'title' } : {}),
+      ...(c.kind === 'side' && c.group === 'title' && c.cx > widthPx * 0.5
+        ? { region: 'right-title' as const, group: 'title' as const }
+        : c.kind === 'side'
+          ? { region: 'margin' as const, group: c.group ?? 'title' }
+          : c.group === 'rank'
+            ? { region: 'rank' as const, group: 'rank' as const }
+            : c.group === 'title'
+              ? { region: 'title' as const, group: 'title' as const }
+              : {}),
     }))
     .filter((a) => !a.skip)
     .map(({ skip: _skip, ...rest }) => rest);
@@ -265,7 +288,12 @@ export function buildPageAnchoredUserPrompt(
     `【字位锚点】本地分割已标出 ${anchors.length} 个待识字（${widthPx}×${heightPx}px）。`,
     '下列 anchors 中每个 id 对应一个待填字位；你必须为每个 id 输出一条 items 记录。',
     '关键：items[i].rx 与 items[i].ry 必须等于 anchors 中 id=i 的 rx/ry（原样复制），items[i].char 为该坐标处的可见汉字。',
-    'region=margin 的锚点为页边标题、书名或页码（常见汉字数字如「三一」「卷二」，竖排），字号可能与正文差异很大，仍须逐 id 填 char，不得漏 id。',
+    marginTitleHint
+      ? `region=margin 的锚点为页边标题、书名或页码（常见汉字数字如「三一」「卷二」，竖排），字号可能与正文差异很大，仍须逐 id 填 char，不得漏 id。左侧书名经本项目共识确认为「${marginTitleHint}」，仅在字形一致时采用。`
+      : 'region=margin 的锚点为页边标题、书名或页码（常见汉字数字如「三一」「卷二」，竖排），字号可能与正文差异很大，仍须逐 id 填 char，不得漏 id。左侧书名必须按每格真实字形识别，严禁依据任何固定书名猜写。',
+    'region=right-title 的锚点来自右外框内侧的大字竖列，常见为世次或卷次标题（如「三世祖」「卷二」）；字数不固定，必须逐 id 逐字识别，不得漏字或只识别残存笔画，不得按固定词表补全。',
+    'region=rank 的锚点来自横向双字手写排行标签，常见词为「長子、次子、三子、四子、五子、六子」；仅用作字形消歧，必须逐字核对，不得按词表猜写。',
+    'region=title 的锚点来自页面右侧大字竖列，通常是世次或祖先标题；必须按锚点真实字形逐字识别，不得根据上下文补全。',
     JSON.stringify({ count: anchors.length, anchors }),
   ].join('\n');
 }
@@ -276,6 +304,7 @@ export function buildPageAnchoredReviewPrompt(
   chars: Array<{ cx: number; cy: number; skipAnchor?: boolean }>,
   widthPx: number,
   heightPx: number,
+  round = 2,
 ): string {
   const anchors = chars
     .map((c, id) => ({
@@ -289,8 +318,8 @@ export function buildPageAnchoredReviewPrompt(
   return [
     ANCHORED_FILL_RULES,
     '',
-    `附件仍是同一页族谱整页图（${widthPx}×${heightPx}px）。本地分割共 ${anchors.length} 个字位锚点。`,
-    '第一次识别 JSON 草稿（待审，可能有 id/char 串位）：',
+    `附件仍是同一页族谱整页图（${widthPx}×${heightPx}px）。本地分割共 ${anchors.length} 个字位锚点。现在进行第 ${round} 次独立核验。`,
+    '此前识别 JSON 草稿（待审，可能有 id/char 串位）：',
     draft,
     '',
     '复核步骤：',

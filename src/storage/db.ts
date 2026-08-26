@@ -39,6 +39,8 @@ export interface RecognitionMemoryRecord {
   signature: string;
   aspectBucket: number;
   char: string;
+  /** 产生该记忆的项目（跨项目隔离，防止旧谱书字形污染新谱书识别；旧记录可能缺省） */
+  projectId?: string;
   totalCount: number;
   manualCount: number;
   modelCount: number;

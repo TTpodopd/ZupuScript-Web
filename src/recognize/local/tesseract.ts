@@ -10,7 +10,7 @@ import { arrayBufferToBase64 } from '@/lib/utils';
 
 export interface OcrWorkerAPI {
   ocrChars(
-    items: Array<{ key: string; dataUrls: string[] }>,
+    items: Array<{ key: string; dataUrls: string[]; orientation?: 'horizontal' | 'vertical' }>,
     onProgress?: (progress: LocalOcrWorkerProgress) => void,
   ): Promise<LocalOcrResult[]>;
   terminate(): Promise<void>;
@@ -26,6 +26,8 @@ export interface LocalOcrResult {
   text: string | null;
   confidence: number;
   candidates: string[];
+  agreeingPasses: number;
+  totalPasses: number;
 }
 
 let workerInstance: Worker | null = null;
@@ -116,6 +118,9 @@ export async function localOcrChars(
     const chunk = chars.slice(start, start + chunkSize);
     const items = await Promise.all(chunk.map(async (c) => ({
       key: c.id,
+      // 「三」主要由横画构成；即使它位于竖排标题，也优先使用横排模型，
+      // 避免 chi_tra_vert 将三横误压成单竖线/「一」。
+      orientation: c.group === 'rank' || c.group === 'title' || c.group === 'pageno' ? 'horizontal' as const : 'vertical' as const,
       dataUrls: await Promise.all([
         charCropToDataUrl(bin, pageWidth, pageHeight, c.bbox, 2, 96),
         charCropToDataUrl(bin, pageWidth, pageHeight, c.bbox, 5, 96),

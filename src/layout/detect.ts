@@ -15,8 +15,8 @@ import { connectedComponents } from '@/imaging/raster';
 import type { DetectProfile } from '@/imaging/sourceProfile';
 import { detectProfileFor } from '@/imaging/sourceProfile';
 import { isSolidGraphicBlock } from '@/layout/graphicBlock';
-import type { BorderRect, SourceKind, TagRect, TreeLine } from '@/model/types';
-import { uuid } from '@/lib/utils';
+import type { BorderRect, CharItem, SourceKind, TagRect, TreeLine, TreeNode } from '@/model/types';
+import { median, uuid } from '@/lib/utils';
 
 export interface DetectOptions {
   sourceKind?: SourceKind;
@@ -630,4 +630,70 @@ export function detectTreeLines(bin: Uint8Array, width: number, height: number, 
   const hLines = componentsToLines(openH, width, height, 'h').filter((line) => line.widthPx <= Math.max(10, height * 0.004));
   const vLines = componentsToLines(openV, width, height, 'v').filter((line) => line.widthPx <= Math.max(10, width * 0.006));
   return [...hLines, ...vLines];
+}
+
+function lineLength(line: TreeLine): number {
+  return Math.hypot(line.x2 - line.x1, line.y2 - line.y1);
+}
+
+function rangesTouch(a0: number, a1: number, b0: number, b1: number, tolerance: number): boolean {
+  return Math.max(a0, b0) <= Math.min(a1, b1) + tolerance;
+}
+
+function linesConnect(a: TreeLine, b: TreeLine, tolerance: number): boolean {
+  if (a.orientation === b.orientation) {
+    if (a.orientation === 'h') {
+      return Math.abs(a.y1 - b.y1) <= tolerance
+        && rangesTouch(Math.min(a.x1, a.x2), Math.max(a.x1, a.x2), Math.min(b.x1, b.x2), Math.max(b.x1, b.x2), tolerance);
+    }
+    return Math.abs(a.x1 - b.x1) <= tolerance
+      && rangesTouch(Math.min(a.y1, a.y2), Math.max(a.y1, a.y2), Math.min(b.y1, b.y2), Math.max(b.y1, b.y2), tolerance);
+  }
+  const horizontal = a.orientation === 'h' ? a : b;
+  const vertical = a.orientation === 'v' ? a : b;
+  return vertical.x1 >= Math.min(horizontal.x1, horizontal.x2) - tolerance
+    && vertical.x1 <= Math.max(horizontal.x1, horizontal.x2) + tolerance
+    && horizontal.y1 >= Math.min(vertical.y1, vertical.y2) - tolerance
+    && horizontal.y1 <= Math.max(vertical.y1, vertical.y2) + tolerance;
+}
+
+function lineOverlapsText(line: TreeLine, char: CharItem, tolerance: number): boolean {
+  const [x0, y0, x1, y1] = char.bbox;
+  if (line.orientation === 'h') {
+    if (line.y1 < y0 - tolerance || line.y1 > y1 + tolerance) return false;
+    const overlap = Math.max(0, Math.min(Math.max(line.x1, line.x2), x1) - Math.max(Math.min(line.x1, line.x2), x0));
+    return overlap >= Math.min(x1 - x0, lineLength(line)) * 0.45;
+  }
+  if (line.x1 < x0 - tolerance || line.x1 > x1 + tolerance) return false;
+  const overlap = Math.max(0, Math.min(Math.max(line.y1, line.y2), y1) - Math.max(Math.min(line.y1, line.y2), y0));
+  return overlap >= Math.min(y1 - y0, lineLength(line)) * 0.45;
+}
+
+/**
+ * 将穿过正文字符的短误检线与真实谱系框架分开。
+ * 连接两个以上线段、接入节点或明显长于一个字距的线段视为结构线，始终保留。
+ */
+export function partitionTextOccludingTreeLines(
+  lines: TreeLine[],
+  chars: CharItem[],
+  nodes: TreeNode[] = [],
+): { kept: TreeLine[]; occluding: TreeLine[] } {
+  const textChars = chars.filter((char) => char.kind === 'text' && char.group !== 'pageno');
+  const typicalSide = median(textChars.map((char) => Math.max(char.bbox[2] - char.bbox[0], char.bbox[3] - char.bbox[1]))) || 20;
+  const kept: TreeLine[] = [];
+  const occluding: TreeLine[] = [];
+  for (const line of lines) {
+    const length = lineLength(line);
+    const tolerance = Math.max(2, line.widthPx + 1);
+    const connected = lines.filter((other) => other.id !== line.id && linesConnect(line, other, tolerance)).length;
+    const endpointHasNode = nodes.some((node) => (
+      Math.hypot(node.cx - line.x1, node.cy - line.y1) <= node.r + tolerance
+      || Math.hypot(node.cx - line.x2, node.cy - line.y2) <= node.r + tolerance
+    ));
+    const structural = length >= typicalSide * 3 || connected >= 2 || endpointHasNode;
+    const overlapsText = textChars.some((char) => lineOverlapsText(line, char, tolerance));
+    if (!structural && overlapsText) occluding.push(line);
+    else kept.push(line);
+  }
+  return { kept, occluding };
 }

@@ -8,7 +8,7 @@ import { CONFIDENCE_THRESHOLD, GRID_BATCH_SIZE, GRID_COLS, PAGE_RECOGNITION_MAX_
 import type { CharItem, Page, PrivacyMode } from '@/model/types';
 import { assertModeAllowed } from '@/privacy/consent';
 import { bumpSessionUploads, logAudit } from '@/privacy/audit';
-import { getCache, setCache } from '@/storage/db';
+import { getCache, listPagesOfProject, setCache } from '@/storage/db';
 import { buildGridBatch, hashBatch, pageBinaryToPngBase64Downscaled } from '@/segment/grid';
 import { backoffDelay, fnv1a, runPool } from '@/lib/utils';
 import {
@@ -19,7 +19,8 @@ import {
   isValidChar,
   RECOGNITION_PROMPT_VERSION,
 } from './prompt';
-import { correctAutomatedZiJieConfusion, postprocessItems } from './postprocess';
+import { correctAutomatedZiJieConfusion, markAutomatedHandwrittenRankForReview, normalizeKnownMarginTitleBoxes, parseMarginTitleHint, postprocessItems, repairGenealogySequences } from './postprocess';
+import { inferProjectMarginTitle } from './projectConsensus';
 import { localOcrChars } from './local/tesseract';
 import { learnCharacters, recallCharacters } from './memory';
 import type {
@@ -40,9 +41,8 @@ import { deepseekProvider } from './providers/deepseek';
 import type { GlyphVerifyInput } from './glyphVerify';
 import { inkMetricsInBbox } from '@/imaging/ink';
 import { canonicalizeAnchoredPageItems, normalizeAnchoredPageItems } from './anchorMatch';
-import { resolveFixedBookTitle, getFixedTitleDebug } from './fixedTitle';
-import { applyLeftMarginPageNumbers } from '@/layout/marginRegions';
 import { applyRecognitionPatch, fillFromAnchoredItems } from './fillPipeline';
+import { countRecognitionVotes, deferIncompleteRecognition, mergeThreeRecognitionPasses } from './consensus';
 
 const PROVIDERS: Record<Exclude<ProviderId, 'local'>, LLMProvider> = {
   gemini: geminiProvider,
@@ -67,27 +67,6 @@ export function providerDomain(provider: LLMProvider, cfg: ProviderConfig): stri
   } catch {
     return 'unknown';
   }
-}
-
-/** 合并初识别与复核结果：一致提权，不一致强制进入人工校对。 */
-function mergeReviewedItems(first: RecognizedItem[], reviewed: RecognizedItem[]): RecognizedItem[] {
-  const reviewedById = new Map(reviewed.map((item) => [item.id, item]));
-  return first.map((initial) => {
-    const second = reviewedById.get(initial.id);
-    if (!second) return { ...initial, confidence: Math.min(initial.confidence, CONFIDENCE_THRESHOLD - 0.01), note: 'blurry' };
-    if (initial.char === second.char) {
-      return { ...second, confidence: Math.min(1, Math.max(initial.confidence, second.confidence) + 0.03) };
-    }
-    if (second.char !== null && second.confidence >= 0.93 && (initial.char === null || initial.confidence < 0.55)) {
-      return { ...second, confidence: Math.max(CONFIDENCE_THRESHOLD + 0.03, second.confidence), note: second.note ?? 'ok' };
-    }
-    return {
-      ...second,
-      confidence: Math.min(second.confidence, CONFIDENCE_THRESHOLD - 0.01),
-      note: second.char === null ? 'empty' : 'blurry',
-      candidates: [...new Set([initial.char, second.char, ...(second.candidates ?? [])].filter((value): value is string => Boolean(value)))].slice(0, 3),
-    };
-  });
 }
 
 /** 带超时的 AbortSignal 包装 */
@@ -145,12 +124,22 @@ async function downgradeBatch(
   width: number,
   height: number,
   patch: Map<string, Partial<CharItem>>,
+  glyphDrafts?: Map<string, GlyphVerifyInput>,
 ): Promise<void> {
   try {
     const results = await localOcrChars(slice, bin, width, height);
     for (const c of slice) {
-      const text = results.get(c.id)?.text ?? null;
+      const result = results.get(c.id);
+      const text = result?.text ?? null;
       patch.set(c.id, { text, conf: 0, note: text ? 'blurry' : 'empty', source: 'local' });
+      if (text) {
+        glyphDrafts?.set(c.id, {
+          primary: text,
+          modelConfidence: result?.confidence ?? 0,
+          candidates: result?.candidates,
+          routeVotes: result?.agreeingPasses ?? 0,
+        });
+      }
     }
   } catch {
     for (const c of slice) {
@@ -159,14 +148,15 @@ async function downgradeBatch(
   }
 }
 
-function mergePageReviewedItems(
+function mergePageVerifiedItems(
   first: RecognizedPageItem[],
-  reviewed: RecognizedItem[],
+  second: RecognizedPageItem[],
+  third: RecognizedPageItem[],
   chars: CharItem[],
   widthPx: number,
   heightPx: number,
 ): RecognizedPageItem[] {
-  const merged = mergeReviewedItems(first, reviewed);
+  const merged = mergeThreeRecognitionPasses(first, second, third);
   return merged.map((it) => {
     const idx = it.id;
     if (idx < 0 || idx >= chars.length) {
@@ -199,6 +189,7 @@ async function runGridBatchesForChars(
   glyphDrafts: Map<string, GlyphVerifyInput>,
   usageTotal: { promptTokens: number; completionTokens: number },
   onBatchDone: (done: number, total: number, message: string) => void,
+  marginTitleHint?: string,
 ): Promise<{ costCny: number; failedBatches: number }> {
   if (unresolved.length === 0) return { costCny: 0, failedBatches: 0 };
   const slices: CharItem[][] = [];
@@ -211,7 +202,7 @@ async function runGridBatchesForChars(
   let stoppedByBudget = false;
   await runPool(slices, Math.min(cfg.concurrency, 5), async (slice, idx) => {
     if (stoppedByBudget) {
-      await downgradeBatch(slice, bin, width, height, patch);
+      await downgradeBatch(slice, bin, width, height, patch, glyphDrafts);
       failedBatches += 1;
       return;
     }
@@ -223,7 +214,16 @@ async function runGridBatchesForChars(
     const cols = Math.min(GRID_COLS, slice.length);
     const rows = Math.ceil(slice.length / Math.max(1, cols));
     const pageNumberIds = batch.ids.map((sliceIndex, id) => (slice[sliceIndex]?.group === 'pageno' ? id : -1)).filter((id) => id >= 0);
-    const initialPrompt = buildGridUserPrompt(cols, rows, slice.length, localDraft, pageNumberIds);
+    const rankIds = batch.ids.map((sliceIndex, id) => (slice[sliceIndex]?.group === 'rank' ? id : -1)).filter((id) => id >= 0);
+    const titleIds = batch.ids.map((sliceIndex, id) => {
+      const char = slice[sliceIndex];
+      return char?.group === 'title' && (char.kind !== 'side' || char.cx > width * 0.5) ? id : -1;
+    }).filter((id) => id >= 0);
+    const marginTitleIds = batch.ids.map((sliceIndex, id) => {
+      const char = slice[sliceIndex];
+      return char?.group === 'title' && char.kind === 'side' && char.cx <= width * 0.5 ? id : -1;
+    }).filter((id) => id >= 0);
+    const initialPrompt = buildGridUserPrompt(cols, rows, slice.length, localDraft, pageNumberIds, rankIds, titleIds, marginTitleIds, marginTitleHint);
     const cacheKey = [
       RECOGNITION_PROMPT_VERSION,
       cfg.provider,
@@ -233,9 +233,11 @@ async function runGridBatchesForChars(
       fnv1a(initialPrompt),
     ].join(':');
     const estimate = provider.estimateCost(slice.length);
-    if (costCny + estimate * 2 > budgetCny) {
+    // 三次独立识别均要完成，预算不足时整批降级本地多裁剪投票，
+    // 不能为了省一次复核而把两轮结果当作最终填充。
+    if (costCny + estimate * 3 > budgetCny) {
       stoppedByBudget = true;
-      await downgradeBatch(slice, bin, width, height, patch);
+      await downgradeBatch(slice, bin, width, height, patch, glyphDrafts);
       failedBatches += 1;
       onBatchDone(done, slices.length, '已达单页成本上限，剩余批次降级本地识别');
       return;
@@ -244,45 +246,55 @@ async function runGridBatchesForChars(
     bumpSessionUploads(1);
     if (!result) {
       failedBatches += 1;
-      await downgradeBatch(slice, bin, width, height, patch);
+        await downgradeBatch(slice, bin, width, height, patch, glyphDrafts);
     } else {
       costCny += estimate;
       if (result.usage) {
         usageTotal.promptTokens += result.usage.promptTokens;
         usageTotal.completionTokens += result.usage.completionTokens;
       }
-      let reviewed = result;
+      let reviewedItems = deferIncompleteRecognition(result.items);
+      let consensusRounds: RecognizedItem[][] | undefined;
       try {
-        const reviewPrompt = buildReviewPrompt(JSON.stringify({ items: result.items }), slice.length);
-        const reviewKey = `${cacheKey}:review:${fnv1a(reviewPrompt)}`;
+        const reviewPrompt = buildReviewPrompt(JSON.stringify({ items: result.items }), slice.length, 2);
+        const reviewKey = `${cacheKey}:review-2:${fnv1a(reviewPrompt)}`;
         const second = await recognizeOneBatch(provider, cfg, batch, reviewKey, reviewPrompt);
         if (second) {
           bumpSessionUploads(1);
-          reviewed = {
-            items: mergeReviewedItems(result.items, second.items),
-            usage: {
-              promptTokens: (result.usage?.promptTokens ?? 0) + (second.usage?.promptTokens ?? 0),
-              completionTokens: (result.usage?.completionTokens ?? 0) + (second.usage?.completionTokens ?? 0),
-            },
-          };
           costCny += estimate;
           if (second.usage) {
             usageTotal.promptTokens += second.usage.promptTokens;
             usageTotal.completionTokens += second.usage.completionTokens;
           }
-          onBatchDone(done, slices.length, `第 ${idx + 1}/${slices.length} 批已完成模型综合校验`);
+          onBatchDone(done, slices.length, `第 ${idx + 1}/${slices.length} 批第 2/3 轮核验完成，正在进行第 3 轮…`);
+          const finalPrompt = buildReviewPrompt(
+            JSON.stringify({ round1: result.items, round2: second.items }),
+            slice.length,
+            3,
+          );
+          const finalKey = `${cacheKey}:review-3:${fnv1a(finalPrompt)}`;
+          const third = await recognizeOneBatch(provider, cfg, batch, finalKey, finalPrompt);
+          if (third) {
+            bumpSessionUploads(1);
+            costCny += estimate;
+            if (third.usage) {
+              usageTotal.promptTokens += third.usage.promptTokens;
+              usageTotal.completionTokens += third.usage.completionTokens;
+            }
+            consensusRounds = [result.items, second.items, third.items];
+            reviewedItems = mergeThreeRecognitionPasses(result.items, second.items, third.items);
+            onBatchDone(done, slices.length, `第 ${idx + 1}/${slices.length} 批三轮核验完成，正在按多数共识写入`);
+          }
         }
       } catch (err) {
-        console.warn('[orchestrator] 模型综合校验失败，保留初次结果：', err);
+        console.warn('[orchestrator] 三轮模型核验未完整完成，不自动写入该批：', err);
       }
-      const processed = postprocessItems(reviewed.items, { isGenealogy: true });
-      const initialById = new Map(result.items.map((item) => [item.id, item]));
+      const processed = postprocessItems(reviewedItems, { isGenealogy: true, strictConsensus: true });
       for (const item of processed) {
         const sliceIndex = batch.ids[item.id];
         const char = slice[sliceIndex];
         if (!char) continue;
         const valid = isValidChar(item.char, item.note);
-        const initial = initialById.get(item.id);
         patch.set(char.id, {
           text: valid ? item.char : null,
           conf: valid ? item.confidence : 0,
@@ -294,7 +306,9 @@ async function runGridBatchesForChars(
             primary: item.char,
             modelConfidence: item.confidence,
             candidates: item.candidates,
-            routeVotes: initial && initial.char === item.char ? 2 : 1,
+            routeVotes: consensusRounds
+              ? countRecognitionVotes(item.id, item.char, consensusRounds)
+              : 0,
           });
         }
       }
@@ -308,6 +322,15 @@ async function runGridBatchesForChars(
 export interface RecognizePageResultFull {
   chars: CharItem[];
   outcome: RecognizePageOutcome;
+}
+
+export interface RecognizePageOptions {
+  /**
+   * 左页边书名提示（人工确认或项目级共识）。
+   * 缺省时自动从本项目已高置信识别的页面共识推断；无共识则不注入任何书名偏向，
+   * 保证新谱书图像识别的泛化能力。
+   */
+  bookTitle?: string;
 }
 
 /**
@@ -324,27 +347,26 @@ export async function recognizePage(
   mode: PrivacyMode,
   budgetCny = Infinity,
   onProgress?: (p: RecognizeProgress) => void,
+  options?: RecognizePageOptions,
 ): Promise<RecognizePageResultFull> {
   assertModeAllowed(mode);
+  // 书名提示：显式提供 → 归一化后使用；否则从项目自身页面共识推断（可能为 undefined = 零偏向）
+  let marginTitleHint = parseMarginTitleHint(options?.bookTitle);
+  if (!marginTitleHint) {
+    marginTitleHint = await listPagesOfProject(page.projectId)
+      .then((pages) => inferProjectMarginTitle(pages))
+      .catch(() => undefined);
+  }
   const totalChars = page.chars.length;
   const patch = new Map<string, Partial<CharItem>>();
   const glyphDrafts = new Map<string, GlyphVerifyInput>();
-  // 临时固定识别：左侧书名栏固定为「倪氏宗譜」，直接写结果并跳过模型；
-  // 书名栏的断裂碎片/多余框标记 consumed，不再送识别并在结果中删除
-  const fixed = resolveFixedBookTitle(page.chars, width);
-  const fixedTitle = fixed.assignments;
-  const fixedSkip = fixed.consumedIds;
-  console.info('[fixedTitle]', getFixedTitleDebug());
-  for (const [id, text] of fixedTitle) {
-    patch.set(id, { text, conf: 0.99, note: 'ok', source: 'manual' });
-  }
   // 已由分析阶段区域算法确定的页码同样锁定，避免识别阶段覆盖。
   const protectedPageNumbers = page.chars.filter((c) => c.group === 'pageno' && c.edited && Boolean(c.text));
   const protectedPageNumberIds = new Set(protectedPageNumbers.map((c) => c.id));
   for (const c of protectedPageNumbers) {
     patch.set(c.id, { text: c.text, conf: Math.max(c.conf, 0.99), note: 'ok', source: 'manual' });
   }
-  const protectedSkip = new Set([...fixedSkip, ...protectedPageNumberIds]);
+  const protectedSkip = new Set(protectedPageNumberIds);
   const segmentNotes = new Map(
     page.chars
       .filter((c) => c.note === 'split' || c.note === 'merge' || c.note === 'spacing')
@@ -368,14 +390,19 @@ export async function recognizePage(
 
   if (mode === 'A') {
     /* ---------- 模式 A：全本地 Tesseract ---------- */
-    const remembered = await recallCharacters(page.chars, bin, width, height).catch(() => new Map());
+    const remembered = await recallCharacters(page.chars, bin, width, height, page.projectId).catch(() => new Map());
+    const confirmedMemoryIds = new Set<string>();
     for (const char of page.chars) {
       const memory = remembered.get(char.id);
-      if (memory && !protectedSkip.has(char.id)) patch.set(char.id, { text: memory.text, conf: memory.confidence, note: 'ok', source: 'local' });
+      // 模型/本地学习结果仍需本次三轮复核；只有重复的人工确认可直接复用。
+      if (memory && memory.manualCount >= 2 && !protectedSkip.has(char.id)) {
+        confirmedMemoryIds.add(char.id);
+        patch.set(char.id, { text: memory.text, conf: memory.confidence, note: 'ok', source: 'local' });
+      }
     }
-    const unresolved = page.chars.filter((char) => !remembered.has(char.id) && !protectedSkip.has(char.id));
+    const unresolved = page.chars.filter((char) => !confirmedMemoryIds.has(char.id) && !protectedSkip.has(char.id));
     batchCount = Math.max(1, Math.ceil(unresolved.length / 12));
-    report(0, `本地识别记忆命中 ${remembered.size} 字，继续深度识别 ${unresolved.length} 字`);
+    report(0, `人工确认记忆命中 ${confirmedMemoryIds.size} 字，继续深度识别 ${unresolved.length} 字`);
     const results = await localOcrChars(unresolved, bin, width, height, (doneChars, total, detail) => {
       const done = Math.ceil((doneChars / Math.max(1, total)) * batchCount);
       report(done, detail ? `本地 OCR 初始化：${detail}` : `正在深度识别文字：${doneChars}/${total} 字，已完成多轮投票复核`);
@@ -391,21 +418,25 @@ export async function recognizePage(
         primary: text,
         modelConfidence: conf,
         candidates: result?.candidates,
-        routeVotes: result?.candidates?.length ?? 1,
+        routeVotes: result?.agreeingPasses ?? 0,
       });
     }
     report(batchCount, '本地深度识别完成：多轮结果已合并，低置信字请在画布校对');
   } else if (mode === 'B') {
     /* ---------- 模式 B：字符拼图上云（默认） ---------- */
     const provider = getProvider(cfg.provider);
-    const remembered = await recallCharacters(page.chars, bin, width, height).catch(() => new Map());
+    const remembered = await recallCharacters(page.chars, bin, width, height, page.projectId).catch(() => new Map());
+    const confirmedMemoryIds = new Set<string>();
     for (const char of page.chars) {
       const memory = remembered.get(char.id);
-      if (memory && !protectedSkip.has(char.id)) patch.set(char.id, { text: memory.text, conf: memory.confidence, note: 'ok', source: 'local' });
+      if (memory && memory.manualCount >= 2 && !protectedSkip.has(char.id)) {
+        confirmedMemoryIds.add(char.id);
+        patch.set(char.id, { text: memory.text, conf: memory.confidence, note: 'ok', source: 'local' });
+      }
     }
-    const unresolved = page.chars.filter((char) => !remembered.has(char.id) && !protectedSkip.has(char.id));
+    const unresolved = page.chars.filter((char) => !confirmedMemoryIds.has(char.id) && !protectedSkip.has(char.id));
     batchCount = Math.max(1, Math.ceil(unresolved.length / GRID_BATCH_SIZE));
-    report(0, `识别记忆命中 ${remembered.size} 字；其余 ${unresolved.length} 字分 ${batchCount} 批进行模型校验`);
+    report(0, `人工确认记忆命中 ${confirmedMemoryIds.size} 字；其余 ${unresolved.length} 字分 ${batchCount} 批进行三轮模型校验`);
     const grid = await runGridBatchesForChars(
       unresolved,
       bin,
@@ -418,6 +449,7 @@ export async function recognizePage(
       glyphDrafts,
       usageTotal,
       (done, total, message) => report(Math.min(batchCount, done), message || `已完成 ${done}/${total} 批`),
+      marginTitleHint,
     );
     costCny += grid.costCny;
     failedBatches += grid.failedBatches;
@@ -434,11 +466,11 @@ export async function recognizePage(
   } else {
     /* ---------- 模式 C：锚点整页上云 + 拼图补识别（漏字/低置信回退 B） ---------- */
     const provider = getProvider(cfg.provider);
-    const remembered = await recallCharacters(page.chars, bin, width, height).catch(() => new Map());
+    const remembered = await recallCharacters(page.chars, bin, width, height, page.projectId).catch(() => new Map());
     const rememberedIds = new Set<string>();
     for (const char of page.chars) {
       const memory = remembered.get(char.id);
-      if (memory && !protectedSkip.has(char.id)) {
+      if (memory && memory.manualCount >= 2 && !protectedSkip.has(char.id)) {
         rememberedIds.add(char.id);
         patch.set(char.id, { text: memory.text, conf: memory.confidence, note: 'ok', source: 'local' });
       }
@@ -446,11 +478,15 @@ export async function recognizePage(
     for (const id of protectedSkip) rememberedIds.add(id);
     const needCloud = page.chars.filter((c) => !rememberedIds.has(c.id));
     const gridSliceCount = Math.max(0, Math.ceil(needCloud.length / GRID_BATCH_SIZE));
-    batchCount = 10 + Math.max(1, gridSliceCount);
+    batchCount = 15 + Math.max(1, gridSliceCount);
 
     let pageApplied = 0;
     if (provider.recognizePageImage && needCloud.length > 0) {
-      try {
+      const pageRoundEstimate = provider.estimateCost(totalChars) * 3;
+      if (pageRoundEstimate * 3 > budgetCny) {
+        failedBatches += 1;
+        report(0, '单页预算不足以完成三轮整页核验，改用本地/拼图多轮识别');
+      } else try {
         report(0, '正在编码整页图像…');
         const pageImageBase64 = await pageBinaryToPngBase64Downscaled(bin, width, height, PAGE_RECOGNITION_MAX_EDGE);
         // 无墨迹字框（分割噪声/空位）不作为锚点发给模型，避免模型对空白处编字
@@ -459,26 +495,29 @@ export async function recognizePage(
           const hasInk = Boolean(metrics && metrics.inkArea >= 6 && metrics.fillRatio >= 0.04);
           return { ...c, skipAnchor: !hasInk || rememberedIds.has(c.id) };
         });
-        const anchorPrompt = buildPageAnchoredUserPrompt(anchorChars, width, height);
-        report(1, '正在调用云端 API 整页识别（1/2）…');
+        const anchorPrompt = buildPageAnchoredUserPrompt(anchorChars, width, height, marginTitleHint);
+        report(1, '正在调用云端 API 整页识别（第 1/3 轮）…');
         const { signal, cancel } = withTimeout(cfg.timeoutMs * 2);
         const result = await provider.recognizePageImage({ mode: 'C', pageImageBase64, promptOverride: anchorPrompt, signal }, cfg);
         cancel();
         bumpSessionUploads(1);
-        costCny += provider.estimateCost(totalChars) * 3;
+        costCny += pageRoundEstimate;
         if (result.usage) {
           usageTotal.promptTokens += result.usage.promptTokens;
           usageTotal.completionTokens += result.usage.completionTokens;
         }
-        report(6, '整页初次识别完成，正在进行模型输出文档综合校验（2/2）…');
-        let mergedItems = canonicalizeAnchoredPageItems(result.items, page.chars.length);
+        const firstItems = canonicalizeAnchoredPageItems(result.items, page.chars.length);
+        let mergedItems = deferIncompleteRecognition(firstItems);
+        let consensusRounds: RecognizedPageItem[][] | undefined;
+        report(5, '整页初次识别完成，正在按相同锚点进行第 2/3 轮核验…');
         const reviewTimeout = withTimeout(cfg.timeoutMs * 2);
         try {
           const reviewPrompt = buildPageAnchoredReviewPrompt(
-            JSON.stringify({ items: mergedItems }),
+            JSON.stringify({ items: firstItems }),
             anchorChars,
             width,
             height,
+            2,
           );
           const second = await provider.recognizePageImage({
             mode: 'C',
@@ -489,23 +528,61 @@ export async function recognizePage(
           reviewTimeout.cancel();
           if (second.items.length > 0) {
             bumpSessionUploads(1);
-            mergedItems = mergePageReviewedItems(mergedItems, second.items, page.chars, width, height);
-            mergedItems = canonicalizeAnchoredPageItems(mergedItems, page.chars.length);
-            costCny += provider.estimateCost(totalChars) * 3;
+            const secondItems = canonicalizeAnchoredPageItems(second.items, page.chars.length);
+            costCny += pageRoundEstimate;
             if (second.usage) {
               usageTotal.promptTokens += second.usage.promptTokens;
               usageTotal.completionTokens += second.usage.completionTokens;
             }
+            report(9, '第 2/3 轮整页核验完成，正在进行第 3/3 轮最终确认…');
+            const finalTimeout = withTimeout(cfg.timeoutMs * 2);
+            try {
+              const finalPrompt = buildPageAnchoredReviewPrompt(
+                JSON.stringify({ round1: firstItems, round2: secondItems }),
+                anchorChars,
+                width,
+                height,
+                3,
+              );
+              const third = await provider.recognizePageImage({
+                mode: 'C',
+                pageImageBase64,
+                promptOverride: finalPrompt,
+                signal: finalTimeout.signal,
+              }, cfg);
+              finalTimeout.cancel();
+              if (third.items.length > 0) {
+                bumpSessionUploads(1);
+                const thirdItems = canonicalizeAnchoredPageItems(third.items, page.chars.length);
+                consensusRounds = [firstItems, secondItems, thirdItems];
+                mergedItems = mergePageVerifiedItems(firstItems, secondItems, thirdItems, page.chars, width, height);
+                costCny += pageRoundEstimate;
+                if (third.usage) {
+                  usageTotal.promptTokens += third.usage.promptTokens;
+                  usageTotal.completionTokens += third.usage.completionTokens;
+                }
+              }
+            } catch (err) {
+              finalTimeout.cancel();
+              console.warn('[orchestrator] 第三轮整页核验失败，不自动写入未完成共识的结果：', err);
+            }
           }
         } catch (err) {
           reviewTimeout.cancel();
-          console.warn('[orchestrator] 整页模型综合校验失败，保留初次结果：', err);
+          console.warn('[orchestrator] 第二轮整页核验失败，不自动写入未完成共识的结果：', err);
         }
-        report(8, '整页识别完成，正在写入字位结果…');
+        report(12, '三轮整页核验完成，正在进行定位与字形校验…');
         mergedItems = canonicalizeAnchoredPageItems(mergedItems, page.chars.length);
         mergedItems = normalizeAnchoredPageItems(mergedItems, page.chars, width, height);
-        pageApplied = fillFromAnchoredItems(mergedItems, page.chars, rememberedIds, patch, glyphDrafts, width, height);
-        report(9, `整页锚点识别写入 ${pageApplied}/${needCloud.length} 字`);
+        pageApplied = fillFromAnchoredItems(mergedItems, page.chars, rememberedIds, patch, glyphDrafts, width, height, true);
+        if (consensusRounds) {
+          for (const item of mergedItems) {
+            const char = page.chars[item.id];
+            const draft = char ? glyphDrafts.get(char.id) : undefined;
+            if (draft) draft.routeVotes = countRecognitionVotes(item.id, item.char, consensusRounds);
+          }
+        }
+        report(14, `整页锚点三轮共识写入 ${pageApplied}/${needCloud.length} 字`);
       } catch (err) {
         console.warn('[orchestrator] 整页锚点识别失败，将改用拼图补识别：', err);
       }
@@ -519,19 +596,20 @@ export async function recognizePage(
       return !p?.text;
     });
     if (needGrid.length > 0) {
-      report(9, `拼图补识别 ${needGrid.length} 字（整页已覆盖 ${pageApplied} 字）…`);
+      report(14, `拼图三轮补识别 ${needGrid.length} 字（整页已覆盖 ${pageApplied} 字）…`);
       const grid = await runGridBatchesForChars(
         needGrid,
         bin,
         width,
         height,
         cfg,
-        budgetCny,
+        Math.max(0, budgetCny - costCny),
         provider,
         patch,
         glyphDrafts,
         usageTotal,
-        (done, total, message) => report(9 + Math.min(1, done / Math.max(1, total)), message),
+        (done, total, message) => report(14 + Math.min(1, done / Math.max(1, total)), message),
+        marginTitleHint,
       );
       costCny += grid.costCny;
       failedBatches += grid.failedBatches;
@@ -549,19 +627,11 @@ export async function recognizePage(
 
   let chars = applyRecognitionPatch(page.chars, patch, glyphDrafts, bin, width, height);
 
-  // 固定书名字标记为已确认；书名栏多余碎片框直接删除
-  if (protectedSkip.size > 0) {
-    chars = chars
-      .filter((c) => {
-        if (fixedTitle.has(c.id)) return true;
-        if (fixedSkip.has(c.id)) return false;
-        const r = fixed.titleRegion;
-        return !r || c.cx < r[0] || c.cx > r[2] || c.cy < r[1] || c.cy > r[3];
-      })
-      .map((c) => (fixedTitle.has(c.id) ? { ...c, edited: true } : c));
-  }
-
-  chars = chars.map(correctAutomatedZiJieConfusion);
+  chars = repairGenealogySequences(
+    chars.map(correctAutomatedZiJieConfusion).map(markAutomatedHandwrittenRankForReview),
+    { knownMarginTitle: marginTitleHint },
+  );
+  chars = normalizeKnownMarginTitleBoxes(chars, marginTitleHint, width);
 
   chars = chars.map((c) => {
     const segNote = segmentNotes.get(c.id);
@@ -573,7 +643,7 @@ export async function recognizePage(
     };
   });
 
-  await learnCharacters(chars, bin, width, height, page.id).catch(() => undefined);
+  await learnCharacters(chars, bin, width, height, page.id, page.projectId).catch(() => undefined);
 
   return {
     chars,
@@ -601,10 +671,11 @@ export async function crossValidate(
   cfgB: ProviderConfig,
   mode: PrivacyMode,
   onProgress?: (p: RecognizeProgress) => void,
+  options?: RecognizePageOptions,
 ): Promise<RecognizePageResultFull> {
   const [ra, rb] = [
-    await recognizePage(page, bin, width, height, cfgA, mode, Infinity, onProgress),
-    await recognizePage(page, bin, width, height, cfgB, mode, Infinity, onProgress),
+    await recognizePage(page, bin, width, height, cfgA, mode, Infinity, onProgress, options),
+    await recognizePage(page, bin, width, height, cfgB, mode, Infinity, onProgress, options),
   ];
   const mapB = new Map(rb.chars.map((c) => [c.id, c]));
   const chars = ra.chars.map((ca) => {

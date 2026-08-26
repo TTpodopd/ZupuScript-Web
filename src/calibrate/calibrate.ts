@@ -161,7 +161,14 @@ export function calibratePage(
       ? inkHeightPx(binary.data, binary.width, binary.height, c.bbox)
       : c.bbox[3] - c.bbox[1]
   ));
-  const heights = clusterCharHeights(page.chars, inkHeights);
+  // 只让尚未分类的普通正文建立自动字号簇。已由版面规则标出的标题/行款/页码
+  // 若混入聚类，会把较小的行款误当作正文基准，并把真正正文整体改组。
+  const autoEntries = page.chars
+    .map((char, index) => ({ char, height: inkHeights[index] }))
+    .filter(({ char }) => char.kind !== 'side' && char.group === 'body');
+  const autoChars = autoEntries.length > 0 ? autoEntries.map(({ char }) => char) : page.chars;
+  const autoHeights = autoEntries.length > 0 ? autoEntries.map(({ height }) => height) : inkHeights;
+  const heights = clusterCharHeights(autoChars, autoHeights);
   const fontSizes: FontSizes = { body: 0, title: 0, pageno: 0, rank: 0 };
 
   // 每组代表高度 → pt
@@ -170,6 +177,34 @@ export function calibratePage(
     const g = groupNameForRank(rankAsc, heights.length);
     fontSizes[g] = groupPts[rankAsc];
   });
+
+  // 先按高度给普通正文分组；版面阶段已明确识别出的标题、行款和页边字必须保留语义，
+  // 否则「長子/次子」等横排标签会在字号标定时被重新覆盖成正文。
+  const groups = page.chars.map((c, idx): FontGroup => {
+    if (c.kind === 'side') return c.group === 'title' ? 'title' : 'pageno';
+    if (c.group !== 'body') return c.group;
+    const h = inkHeights[idx] ?? c.bbox[3] - c.bbox[1];
+    let bestRank = 0;
+    let bestDist = Infinity;
+    heights.forEach((rep, rank) => {
+      const distance = Math.abs(h - rep);
+      if (distance < bestDist) {
+        bestDist = distance;
+        bestRank = rank;
+      }
+    });
+    return groupNameForRank(bestRank, heights.length);
+  });
+
+  // 对每个语义组单独取真实墨迹高度中位数。标题框的 padding、断笔和正文数量
+  // 不再共同拉高或压低字号，四字书名与右侧世次标题会得到各自稳定字号。
+  for (const group of ['body', 'title', 'rank'] as const) {
+    const measured = inkHeights.filter((height, index) => groups[index] === group && height > 0);
+    if (measured.length > 0) {
+      fontSizes[group] = Math.round(charHeightToPt(median(measured), pxPerMm) * 10) / 10;
+    }
+  }
+  if (fontSizes.body === 0) fontSizes.body = groupPts[0] ?? 0;
   if (fontSizes.rank === 0) fontSizes.rank = fontSizes.body;
   if (fontSizes.title === 0) fontSizes.title = fontSizes.body;
   if (fontSizes.pageno === 0) fontSizes.pageno = fontSizes.body;
@@ -187,24 +222,8 @@ export function calibratePage(
     }
   }
 
-  // 写回字符：按高度就近归组
   const chars = page.chars.map((c, idx) => {
-    const h = inkHeights[idx] ?? c.bbox[3] - c.bbox[1];
-    let bestRank = 0;
-    let bestDist = Infinity;
-    heights.forEach((rep, rank) => {
-      const d = Math.abs(h - rep);
-      if (d < bestDist) {
-        bestDist = d;
-        bestRank = rank;
-      }
-    });
-    const group =
-      c.kind === 'side' && (c.group === 'title' || c.group === 'pageno')
-        ? c.group
-        : c.kind === 'side'
-          ? 'pageno'
-          : groupNameForRank(bestRank, heights.length);
+    const group = groups[idx];
     return { ...c, group, pt: fontSizes[group] };
   });
 

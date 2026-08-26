@@ -19,8 +19,9 @@ export function fillFromAnchoredItems(
   glyphDrafts: Map<string, GlyphVerifyInput>,
   widthPx: number,
   heightPx: number,
+  strictConsensus = false,
 ): number {
-  const processed = (postprocessItems(items, { isGenealogy: true }) as RecognizedPageItem[]).map((it) => {
+  const processed = (postprocessItems(items, { isGenealogy: true, strictConsensus }) as RecognizedPageItem[]).map((it) => {
     const cleaned = sanitizeCharOutput(it.char, it.note);
     return { ...it, char: cleaned.char, note: cleaned.note };
   });

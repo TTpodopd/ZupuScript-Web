@@ -7,6 +7,7 @@ import {
   applyColumnStructure,
   snapCharsToColumnCenters,
   dedupeOverlappingChars,
+  detectHandwrittenRankPairs,
 } from '../src/segment/columns.ts';
 
 function mkChar(id, cx, cy, h = 18) {
@@ -93,4 +94,33 @@ const overlap = [
 const deduped = dedupeOverlappingChars(overlap, 18);
 check('重叠框只保留一个', deduped.length === 1);
 
+section('手写排行标签定向检测');
+const handwrittenRanks = [
+  mkChar('long', 50, 180, 20), mkChar('son1', 70, 183, 18),
+  mkChar('second', 115, 181, 22), mkChar('son2', 136, 179, 19),
+  mkChar('third', 180, 182, 21), mkChar('son3', 201, 180, 18),
+];
+const rankPairs = detectHandwrittenRankPairs(handwrittenRanks, 20);
+eq('同行多组双字标签全部检出', rankPairs.length, 3);
+const refinedRanks = applyColumnStructure(handwrittenRanks, 20);
+check('检出标签标记为 rank', refinedRanks.every((char) => char.group === 'rank'));
+for (const pair of rankPairs) {
+  const first = refinedRanks.find((char) => char.id === pair.firstId);
+  const second = refinedRanks.find((char) => char.id === pair.secondId);
+  check(`排行双框 y 对齐 ${pair.firstId}`, Math.abs(first.cy - second.cy) < 0.01);
+}
+
+const ordinaryHorizontal = [
+  mkChar('t1', 40, 260), mkChar('t2', 60, 260), mkChar('t3', 80, 260), mkChar('t4', 100, 260),
+];
+eq('连续横排正文不误判为排行双字组', detectHandwrittenRankPairs(ordinaryHorizontal, 20).length, 0);
+section('右侧世次标题列');
+const rightTitlePage = [
+  mkChar('body1', 80, 80, 18), mkChar('body2', 120, 80, 18), mkChar('body3', 160, 80, 18),
+  mkChar('body4', 80, 120, 18), mkChar('body5', 120, 120, 18), mkChar('body6', 160, 120, 18),
+  mkChar('gen1', 280, 60, 26), mkChar('gen2', 282, 92, 26), mkChar('gen3', 279, 124, 26),
+];
+const rightStructured = applyColumnStructure(rightTitlePage, 18, 320);
+check('右侧连续大字竖列标记为标题', rightStructured.filter((char) => char.id.startsWith('gen')).every((char) => char.group === 'title'));
+check('正文分组保持不变', rightStructured.filter((char) => char.id.startsWith('body')).every((char) => char.group === 'body'));
 summary('columns');

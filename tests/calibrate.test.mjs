@@ -75,11 +75,11 @@ const active = activeFontGroups(mixed.chars);
 check('activeFontGroups 不含空组', active.every((g) => counts[g] > 0));
 check('activeFontGroups 含 rank/body/title/pageno 中有字的组', active.length >= 2);
 const resized = applyFontSizeToGroup(mixed, 'body', 9);
-eq('applyFontSizeToGroup 只改目标组 pt', resized.chars.filter((c) => c.group === 'body').every((c) => c.pt === 9));
+check('applyFontSizeToGroup 只改目标组 pt', resized.chars.filter((c) => c.group === 'body').every((c) => c.pt === 9));
 check('applyFontSizeToGroup 不改其他组', resized.chars.filter((c) => c.group !== 'body').every((c) => c.pt === mixed.chars.find((x) => x.id === c.id)?.pt));
-eq('FONT_GROUP_LABELS.rank 可读', FONT_GROUP_LABELS.rank.includes('主文字'));
+check('FONT_GROUP_LABELS.rank 可读', FONT_GROUP_LABELS.rank.includes('主文字'));
 const allResized = applyFontSizeToAllChars(mixed, 11);
-eq('applyFontSizeToAllChars 统一 pt', allResized.chars.every((c) => c.pt === 11));
+check('applyFontSizeToAllChars 统一 pt', allResized.chars.every((c) => c.pt === 11));
 eq('medianPtAllChars 取中位数', medianPtAllChars(allResized.chars), 11);
 
 // 单组时所有组兜底为同一字号
@@ -99,4 +99,18 @@ const pageNoResult = calibratePage(pageNoPage, undefined, { data: new Uint8Array
 eq('page number pt equals body pt', pageNoResult.fontSizes.pageno, pageNoResult.fontSizes.body);
 check('page number chars use body pt', pageNoResult.chars.filter((c) => c.group === 'pageno').every((c) => c.pt === pageNoResult.fontSizes.body));
 check('body pt unchanged by page numbers', pageNoResult.chars.filter((c) => c.group === 'body').every((c) => c.pt === pageNoResult.fontSizes.body));
+
+section('preserve layout semantic groups');
+const semanticPage = makeSamplePage();
+semanticPage.chars = [
+  ...Array.from({ length: 5 }, (_, i) => ({ ...mkChar(40), id: `semantic-body-${i}` })),
+  { ...mkChar(66), id: 'book-title', group: 'title', kind: 'side' },
+  { ...mkChar(30), id: 'rank-first', group: 'rank' },
+  { ...mkChar(30), id: 'rank-second', group: 'rank' },
+];
+const semanticResult = calibratePage(semanticPage);
+eq('页边标题保留 title 分组', semanticResult.chars.find((c) => c.id === 'book-title').group, 'title');
+check('排行标签不被字号聚类覆盖为正文', semanticResult.chars.filter((c) => c.id.startsWith('rank-')).every((c) => c.group === 'rank'));
+check('标题字号取标题实际高度', semanticResult.fontSizes.title > semanticResult.fontSizes.body);
+check('排行字号按自身真实高度计算', semanticResult.fontSizes.rank < semanticResult.fontSizes.body);
 summary('calibrate');

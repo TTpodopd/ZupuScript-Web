@@ -106,6 +106,8 @@ type LayoutRect = Pick<BorderRect | TagRect, 'x' | 'y' | 'w' | 'h'>;
 
 export interface SegmentOptions {
   sourceKind?: SourceKind;
+  /** 检出的节点圆（作为环带证据剔除圆环残弧噪声框） */
+  nodes?: NodeEvidence[];
 }
 
 interface SegmentThresholds {
@@ -401,6 +403,270 @@ function supplementMissedChars(
   return extras.length ? [...existing, ...extras] : existing;
 }
 
+function distancePointToSegment(px: number, py: number, line: TreeLine): number {
+  const dx = line.x2 - line.x1;
+  const dy = line.y2 - line.y1;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq <= 0) return Math.hypot(px - line.x1, py - line.y1);
+  const t = Math.max(0, Math.min(1, ((px - line.x1) * dx + (py - line.y1) * dy) / lengthSq));
+  return Math.hypot(px - (line.x1 + t * dx), py - (line.y1 + t * dy));
+}
+
+/** 轴对齐线段到矩形的距离（相交为 0）。谱系线均为横平竖直，可精确快算。 */
+function distanceAxisSegmentToRect(
+  line: TreeLine,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+): number {
+  if (line.orientation === 'h') {
+    const lx0 = Math.min(line.x1, line.x2);
+    const lx1 = Math.max(line.x1, line.x2);
+    const dx = lx1 < x0 ? x0 - lx1 : lx0 > x1 ? lx0 - x1 : 0;
+    const dy = line.y1 < y0 ? y0 - line.y1 : line.y1 > y1 ? line.y1 - y1 : 0;
+    return Math.hypot(dx, dy);
+  }
+  const ly0 = Math.min(line.y1, line.y2);
+  const ly1 = Math.max(line.y1, line.y2);
+  const dy = ly1 < y0 ? y0 - ly1 : ly0 > y1 ? ly0 - y1 : 0;
+  const dx = line.x1 < x0 ? x0 - line.x1 : line.x1 > x1 ? line.x1 - x1 : 0;
+  return Math.hypot(dx, dy);
+}
+
+export interface NodeEvidence {
+  cx: number;
+  cy: number;
+  r: number;
+}
+
+/**
+ * 墨迹落在节点圆环带上的像素占比（0..1）。
+ * 节点圆被谱系线擦除切割后残留的弧段，其墨迹几乎全部贴合原圆环；
+ * 圆内/圆旁的真实汉字不会与环带重合。
+ */
+function ringInkFraction(
+  bin: Uint8Array,
+  width: number,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+  nodes: NodeEvidence[],
+): number {
+  let best = 0;
+  for (const node of nodes) {
+    const tol = Math.max(3, node.r * 0.22);
+    // 粗筛：墨迹 bbox 与节点扩展方形无交则跳过
+    if (
+      minX > node.cx + node.r + tol
+      || maxX < node.cx - node.r - tol
+      || minY > node.cy + node.r + tol
+      || maxY < node.cy - node.r - tol
+    ) continue;
+    let total = 0;
+    let onRing = 0;
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        if (!bin[y * width + x]) continue;
+        total += 1;
+        const d = Math.hypot(x - node.cx, y - node.cy);
+        if (Math.abs(d - node.r) <= tol) onRing += 1;
+      }
+    }
+    if (total > 0) best = Math.max(best, onRing / total);
+  }
+  return best;
+}
+
+/**
+ * 墨迹是否由「一横一竖两条细带」构成（L/T/十字接头残段形态）。
+ * 真实汉字笔画结构复杂（多条横带或竖带、框形结构），不会命中单一带判据。
+ */
+function isTwoBarJunctionInk(
+  bin: Uint8Array,
+  width: number,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+  typicalSide: number,
+): boolean {
+  const iw = maxX - minX + 1;
+  const ih = maxY - minY + 1;
+  const bandThickness = Math.max(3, Math.round(typicalSide * 0.28));
+  const rowInk = new Uint32Array(ih);
+  const colInk = new Uint32Array(iw);
+  let total = 0;
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      if (!bin[y * width + x]) continue;
+      rowInk[y - minY] += 1;
+      colInk[x - minX] += 1;
+      total += 1;
+    }
+  }
+  if (total === 0) return false;
+
+  const findBand = (hist: Uint32Array, span: number): [number, number] | null => {
+    let start = -1;
+    let end = -1;
+    for (let i = 0; i < hist.length; i += 1) {
+      if (hist[i] >= span * 0.5) {
+        if (start < 0) start = i;
+        end = i;
+      }
+    }
+    if (start < 0 || end - start + 1 > bandThickness) return null;
+    return [start, end];
+  };
+
+  const hBand = findBand(rowInk, iw);
+  const vBand = findBand(colInk, ih);
+  if (!hBand || !vBand) return false;
+
+  let outside = 0;
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      if (!bin[y * width + x]) continue;
+      const inH = y - minY >= hBand[0] && y - minY <= hBand[1];
+      const inV = x - minX >= vBand[0] && x - minX <= vBand[1];
+      if (!inH && !inV) outside += 1;
+    }
+  }
+  return outside <= total * 0.1;
+}
+
+/** 删除与已确认谱系线同向且贴近线段/端点的细长残段；方形汉字与孤立「一」不受影响。
+ *  传入原二值图时，还会剔除：
+ *  1. 「bbox 方正但内部墨迹是细长线」的膨胀线残段（短谱系线漏检后混入正文）；
+ *  2. 与检测线共线的漏检线尾（同向延长、间隙很小）；
+ *  3. 扒在检测线上的异向细墨迹（T/L 接头擦线后遗留的短桩）；
+ *  4. 贴着检测线的一横一竖双细带团块（L/T/十字接头残块）。
+ *  所有新规则都要求存在谱系线证据且墨迹为细线形态，正文真实字形不受影响。 */
+export function filterResidualLineChars(
+  chars: CharItem[],
+  lines: TreeLine[],
+  typicalSide: number,
+  bin?: Uint8Array,
+  width?: number,
+  height?: number,
+  nodes?: NodeEvidence[],
+): CharItem[] {
+  return chars.filter((char) => {
+    const w = char.bbox[2] - char.bbox[0];
+    const h = char.bbox[3] - char.bbox[1];
+    let horizontal = w >= h * 2.2 && w >= typicalSide * 0.6;
+    let vertical = h >= w * 2.2 && h >= typicalSide * 0.6;
+    let isolatedThinVerticalInk = false;
+
+    // 墨迹几何判定：bbox 方正但内部墨迹是细长线（膨胀后变方的线残段）。
+    if (bin && width && height) {
+      const x0 = Math.max(0, Math.floor(char.bbox[0]));
+      const y0 = Math.max(0, Math.floor(char.bbox[1]));
+      const x1 = Math.min(width, Math.ceil(char.bbox[2]));
+      const y1 = Math.min(height, Math.ceil(char.bbox[3]));
+      let minX = width; let minY = height; let maxX = -1; let maxY = -1;
+      for (let y = y0; y < y1; y += 1) {
+        for (let x = x0; x < x1; x += 1) {
+          if (!bin[y * width + x]) continue;
+          minX = Math.min(minX, x); minY = Math.min(minY, y);
+          maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+        }
+      }
+      if (maxX >= minX) {
+        // 节点圆残弧：墨迹主体（≥70%）落在检出节点圆的环带上 → 圆环被擦线切割后的残留。
+        // 圆内/圆旁的真实汉字不与环带重合，不受影响。
+        if (nodes && nodes.length > 0 && ringInkFraction(bin, width, minX, minY, maxX, maxY, nodes) >= 0.7) {
+          return false;
+        }
+        const iw = maxX - minX + 1;
+        const ih = maxY - minY + 1;
+        const inkAspect = Math.max(iw, ih) / Math.max(1, Math.min(iw, ih));
+        if (inkAspect >= 3) {
+          horizontal = iw >= ih;
+          vertical = ih >= iw;
+          // 单根竖线没有足够横向笔画构成汉字；即使版面检测漏掉其所属谱系线，
+          // 也不能作为待 OCR 字框保留。保守限制为极细、长度接近正常字高的墨迹。
+          isolatedThinVerticalInk = vertical
+            && iw <= Math.max(3, typicalSide * 0.18)
+            && ih >= typicalSide * 0.85;
+          // 细长且明显长于典型字宽：是线残段而非「一」等孤立笔画，直接剔除。
+          if (Math.max(iw, ih) > typicalSide * 1.35) return false;
+        }
+
+        // 线接头/线尾残段剔除（泛化：只依赖检测到的谱系线证据，不依赖样本内容）。
+        // thinInk 闸门保证真实汉字不受影响——汉字墨迹短边≈字号，远大于细线宽度；
+        // 无谱系线证据时一律保留，孤立的「一」不会被误删。
+        const inkShort = Math.min(iw, ih);
+        const inkLong = Math.max(iw, ih);
+        const thinInk = inkShort <= Math.max(4, typicalSide * 0.25);
+        if (thinInk && lines.length > 0 && inkLong >= typicalSide * 0.25 && inkLong <= typicalSide * 1.35) {
+          const horizontalInk = iw >= ih;
+          for (const line of lines) {
+            if ((horizontalInk && line.orientation === 'h') || (!horizontalInk && line.orientation === 'v')) {
+              // 同向延长线：检测线的漏检线尾，与已检出线段共线且间隙很小
+              const axisTol = Math.max(3, line.widthPx + 2);
+              const onAxis = horizontalInk
+                ? Math.abs(char.cy - line.y1) <= axisTol
+                : Math.abs(char.cx - line.x1) <= axisTol;
+              if (onAxis) {
+                const span0 = horizontalInk ? Math.min(line.x1, line.x2) : Math.min(line.y1, line.y2);
+                const span1 = horizontalInk ? Math.max(line.x1, line.x2) : Math.max(line.y1, line.y2);
+                const ink0 = horizontalInk ? minX : minY;
+                const ink1 = horizontalInk ? maxX : maxY;
+                const gap = ink0 > span1 ? ink0 - span1 : span0 > ink1 ? span0 - ink1 : 0;
+                const minLong = horizontalInk ? typicalSide * 1.05 : typicalSide * 0.6;
+                if (gap <= typicalSide * 0.6 && inkLong >= minLong) return false;
+              }
+            } else {
+              // 异向贴线：扒在谱系线上的 T/L 接头残段（擦线后遗留的短桩）
+              const touchTol = Math.max(3, typicalSide * 0.12);
+              if (distanceAxisSegmentToRect(line, minX - touchTol, minY - touchTol, maxX + touchTol, maxY + touchTol) <= line.widthPx / 2 + 1) {
+                return false;
+              }
+            }
+          }
+        }
+
+        // L/T/十字接头团块：墨迹两个方向都有跨度、由一横一竖两条细带构成且贴着谱系线。
+        // 正文里的「十」等真实字形不贴谱系线，不会命中。
+        if (
+          lines.length > 0
+          && iw >= typicalSide * 0.4
+          && ih >= typicalSide * 0.4
+          && isTwoBarJunctionInk(bin, width, minX, minY, maxX, maxY, typicalSide)
+        ) {
+          const touchTol = Math.max(3, typicalSide * 0.12);
+          const touchesLine = lines.some(
+            (line) => distanceAxisSegmentToRect(line, minX - touchTol, minY - touchTol, maxX + touchTol, maxY + touchTol) <= line.widthPx / 2 + 1,
+          );
+          if (touchesLine) return false;
+        }
+      }
+    }
+
+    if (!horizontal && !vertical) return true;
+    // 单根极细竖线不是可识别汉字。无论页面其它位置是否检测到谱系线，
+    // 都直接丢弃，避免把远离谱系线的竖向扫描噪声送入 OCR。
+    if (isolatedThinVerticalInk) return false;
+    if (lines.length === 0) return true; // 横向短笔可能是「一」，保留
+
+    const nearby = lines.some((line) => {
+      if (horizontal && line.orientation !== 'h') return false;
+      if (vertical && line.orientation !== 'v') return false;
+      const tolerance = Math.max(4, line.widthPx * 2 + Math.min(w, h));
+      if (distancePointToSegment(char.cx, char.cy, line) > tolerance) return false;
+      if (horizontal) {
+        const overlap = Math.max(0, Math.min(char.bbox[2], Math.max(line.x1, line.x2)) - Math.max(char.bbox[0], Math.min(line.x1, line.x2)));
+        return overlap >= Math.min(w, typicalSide) * 0.35 || Math.min(Math.abs(char.bbox[0] - line.x2), Math.abs(char.bbox[2] - line.x1)) <= tolerance;
+      }
+      const overlap = Math.max(0, Math.min(char.bbox[3], Math.max(line.y1, line.y2)) - Math.max(char.bbox[1], Math.min(line.y1, line.y2)));
+      return overlap >= Math.min(h, typicalSide) * 0.35 || Math.min(Math.abs(char.bbox[1] - line.y2), Math.abs(char.bbox[3] - line.y1)) <= tolerance;
+    });
+    return !nearby;
+  });
+}
 function filterPhantomChars(
   chars: CharItem[],
   bin: Uint8Array,
@@ -503,6 +769,7 @@ export function segmentChars(
     thresholds.supplementFill,
   );
   chars = filterPhantomChars(chars, cleaned, width, height, thresholds.phantomFill);
+  chars = filterResidualLineChars(chars, lines, typicalSide, cleaned, width, height, options?.nodes);
   chars = supplementMarginChars(
     cleaned,
     denoised,
