@@ -9,7 +9,8 @@
  */
 import * as Comlink from 'comlink';
 import { createWorker } from 'tesseract.js';
-import type { LocalOcrResult, LocalOcrWorkerProgress, OcrWorkerAPI } from '@/recognize/local/tesseract';
+import { calibrateLocalConfidence, hasStableLocalWinner } from '@/recognize/local/tesseract';
+import type { LocalOcrResult, LocalOcrWorkerProgress, LocalVote, OcrWorkerAPI } from '@/recognize/local/tesseract';
 
 type TesseractWorker = {
   recognize: (image: string) => Promise<{ data: { text: string; confidence?: number } }>;
@@ -68,7 +69,7 @@ const api: OcrWorkerAPI = {
     const wv = await getTesseractVert().catch(() => null); // vert 可能不支持，降级单引擎
     for (const item of items) {
       try {
-        const votes = new Map<string, { score: number; count: number; confidenceSum: number }>();
+        const votes = new Map<string, LocalVote>();
         let totalPasses = 0;
         const addVote = (glyph: string | null, weight: number, confidence01: number) => {
           if (!glyph || !CJK_GLYPH_RE.test(glyph)) return; // 字母/数字/标点/符号不参与投票
@@ -77,17 +78,6 @@ const api: OcrWorkerAPI = {
           vote.count += 1;
           vote.confidenceSum += confidence01;
           votes.set(glyph, vote);
-        };
-        const hasStableWinner = (): boolean => {
-          // 每个字至少完成三种裁剪下的双模型复核，再允许提前结束。
-          if (totalPasses < 6 || votes.size === 0) return false;
-          const ranked = [...votes.values()].sort((a, b) => b.score - a.score);
-          const winner = ranked[0];
-          const runnerUp = ranked[1];
-          const agreement = winner.count / totalPasses;
-          const averageConfidence = winner.confidenceSum / Math.max(1, winner.count);
-          const margin = winner.score - (runnerUp?.score ?? 0);
-          return agreement >= 0.75 && averageConfidence >= 0.68 && margin >= 0.65;
         };
         for (let pass = 0; pass < item.dataUrls.length; pass += 1) {
           const dataUrl = item.dataUrls[pass];
@@ -100,7 +90,7 @@ const api: OcrWorkerAPI = {
             addVote([...dv.text.trim().replace(/\s+/g, '')][0] ?? null, item.orientation === 'horizontal' ? 0.9 : 1.25, (dv.confidence ?? 0) / 100);
           }
           // 清晰字的双引擎结果一致时不再重复识别；分歧字继续完整多裁剪投票。
-          if (hasStableWinner()) break;
+          if (hasStableLocalWinner(votes, totalPasses)) break;
         }
         let text: string | null = null;
         let best = -1;
@@ -114,7 +104,8 @@ const api: OcrWorkerAPI = {
         }
         const agreement = winner.count / Math.max(1, totalPasses);
         const averageConfidence = winner.confidenceSum / Math.max(1, winner.count);
-        const confidence = text ? Math.min(0.96, Math.max(0, 0.35 + agreement * 0.45 + averageConfidence * 0.2)) : 0;
+        // 一致率主导校准：双引擎多裁剪全一致才过 0.85 免校对阈值，分歧结果如实给低分。
+        const confidence = text ? calibrateLocalConfidence(agreement, averageConfidence) : 0;
         const candidates = [...votes.entries()]
           .sort((a, b) => b[1].score - a[1].score)
           .map(([candidate]) => candidate)

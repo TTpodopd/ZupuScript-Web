@@ -11,7 +11,8 @@ import { memoryRecordVisible, LEGACY_CROSS_PROJECT_MIN_SIMILARITY } from '../src
 
 section('提示词版本与样本专名清理');
 {
-  eq('提示词版本升级到 v16（旧缓存自动失效）', RECOGNITION_PROMPT_VERSION, 'genealogy-ocr-v16');
+  // 版本号锁：升级 prompt.ts 的 RECOGNITION_PROMPT_VERSION 时须同步更新此断言（强制有意为之）
+  eq('提示词版本升级到 v17（旧缓存自动失效）', RECOGNITION_PROMPT_VERSION, 'genealogy-ocr-v17');
   check('系统提示词不含样本书名', !SYSTEM_PROMPT.includes('倪氏宗譜'));
   check('整页提示词不含样本书名', !PAGE_USER_PROMPT.includes('倪氏宗譜'));
   check('右缘标题指引不写死「三个字」', !SYSTEM_PROMPT.includes('不得漏掉三个字') && !PAGE_USER_PROMPT.includes('不得漏掉三个字'));

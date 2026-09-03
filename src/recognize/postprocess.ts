@@ -129,6 +129,45 @@ export function markAutomatedHandwrittenRankForReview(char: CharItem): CharItem 
 const RANK_PREFIXES = new Set(['長', '长', '次', '三', '四', '五', '六', '七', '八', '九', '十']);
 const RANK_SON_CONFUSIONS = new Set(['孑', '予', '于', '了', '丁']);
 
+/** 竖排列尾结构性字：人名列尾「公」、姓后「氏」。只补列尾，绝不碰列中的人名位 */
+const COLUMN_END_STRUCTURAL_CHARS = new Set(['氏', '公']);
+
+/**
+ * 列尾结构字保守补位：按 x 对齐分竖列，取每列最末（cy 最大）字符。
+ * 若全页 ≥2 列的列尾已识别为某结构字（「公」/「氏」），则列尾为空/低置信
+ * （<0.5）的列补该字（conf 0.80）。
+ * 典型场景：多数人名列以「公」收尾、妻名列以「氏」收尾，个别列尾漏检。
+ * 列尾之外任何位置不碰；manual/edited 不碰；已有 ≥0.5 证据的异字不覆盖。
+ */
+export function fillColumnStructuralChars(chars: CharItem[]): CharItem[] {
+  const out = chars.map((c) => ({ ...c }));
+  const textChars = out.filter((c) => c.kind === 'text');
+  if (textChars.length === 0) return out;
+  const typicalWidth = median(textChars.map((c) => c.bbox[2] - c.bbox[0])) || 20;
+  const columns: CharItem[][] = [];
+  for (const c of [...textChars].sort((a, b) => a.cx - b.cx || a.cy - b.cy)) {
+    const col = columns.find((items) => Math.abs(median(items.map((i) => i.cx)) - c.cx) <= typicalWidth * 0.5);
+    if (col) col.push(c);
+    else columns.push([c]);
+  }
+  const tails = columns
+    .filter((col) => col.length >= 2)
+    .map((col) => [...col].sort((a, b) => a.cy - b.cy)[col.length - 1]);
+  for (const structural of COLUMN_END_STRUCTURAL_CHARS) {
+    const confirmedTails = tails.filter((c) => c.text === structural);
+    if (confirmedTails.length < 2) continue;
+    for (const tail of tails) {
+      if (tail.edited || tail.source === 'manual') continue;
+      if (tail.text === structural) continue;
+      if (tail.text !== null && tail.conf >= DICT_LOW_CONF_MAX) continue;
+      tail.text = structural;
+      tail.conf = Math.max(tail.conf, DICT_CANDIDATE_CONF);
+      tail.note = tail.note === 'empty' ? 'blurry' : tail.note;
+    }
+  }
+  return out;
+}
+
 /**
  * 归一化书名提示：去空白、仅保留 CJK 字形。
  * 少于 2 字视为无效提示（单字不构成书名证据）。

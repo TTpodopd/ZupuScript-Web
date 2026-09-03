@@ -1,6 +1,6 @@
 /** 后处理模块测试：字典提权、候选兜底、异体记录、数量守恒、书名修复参数化 */
 import { check, eq, approx, section, summary } from './helpers.mjs';
-import { correctAutomatedZiJieConfusion, markAutomatedHandwrittenRankForReview, normalizeKnownMarginTitleBoxes, parseMarginTitleHint, postprocessItems, repairGenealogySequences } from '../src/recognize/postprocess.ts';
+import { correctAutomatedZiJieConfusion, fillColumnStructuralChars, markAutomatedHandwrittenRankForReview, normalizeKnownMarginTitleBoxes, parseMarginTitleHint, postprocessItems, repairGenealogySequences } from '../src/recognize/postprocess.ts';
 import { DICT_HIT_CONF, DICT_CANDIDATE_CONF, DICT_LOW_CONF_MAX } from '../src/lib/constants.ts';
 
 section('字典提权');
@@ -222,4 +222,85 @@ section('书名修复参数化（泛化）');
   const unrelatedTitle = marginTitle.map((char, index) => ({ ...char, id: `other-${index}`, text: index === 0 ? '陳' : null }));
   check('其他四字书名不被强制改写', repairGenealogySequences(unrelatedTitle, { knownMarginTitle: '倪氏宗譜' }).some((c) => c.text === null));
 }
+section('列尾结构字补位');
+{
+  const mk = (id, cx, cy, text, conf, extra = {}) => ({
+    id, text, cx, cy, bbox: [cx - 10, cy - 10, cx + 10, cy + 10], pt: 12,
+    conf, note: text === null ? 'empty' : 'ok', source: 'local', edited: false,
+    group: 'body', kind: 'text', ...extra,
+  });
+  // 三列人名：两列列尾「公」已识别，第三列列尾漏检
+  const chars = [
+    mk('c1a', 10, 10, '子', 0.9),
+    mk('c1tail', 10, 50, '公', 0.92),
+    mk('c2a', 40, 10, '孫', 0.9),
+    mk('c2tail', 40, 50, '公', 0.9),
+    mk('c3a', 70, 10, '曾', 0.9),
+    mk('c3tail', 70, 50, null, 0), // 漏检列尾
+    // 第四列：列尾是 ≥0.5 的异字，不得覆盖
+    mk('c4a', 100, 10, '玄', 0.9),
+    mk('c4tail', 100, 50, '松', 0.7),
+  ];
+  const out = fillColumnStructuralChars(chars);
+  const byId = (id) => out.find((c) => c.id === id);
+  eq('漏检列尾补「公」', byId('c3tail').text, '公');
+  approx('补位置信 0.80', byId('c3tail').conf, DICT_CANDIDATE_CONF);
+  eq('≥0.5 异字列尾不覆盖', byId('c4tail').text, '松');
+  eq('已识别列尾不动', byId('c1tail').text, '公');
+  eq('列中人名位不碰', byId('c3a').text, '曾');
+}
+
+section('列尾补位：单证据不触发、人工字不碰、非列尾不碰');
+{
+  const mk = (id, cx, cy, text, conf, extra = {}) => ({
+    id, text, cx, cy, bbox: [cx - 10, cy - 10, cx + 10, cy + 10], pt: 12,
+    conf, note: text === null ? 'empty' : 'ok', source: 'local', edited: false,
+    group: 'body', kind: 'text', ...extra,
+  });
+  // 只有一列列尾是「公」→ 证据不足，不补
+  const oneTail = [
+    mk('a1', 10, 10, '子', 0.9),
+    mk('a2', 10, 50, '公', 0.92),
+    mk('b1', 40, 10, '孫', 0.9),
+    mk('b2', 40, 50, null, 0),
+  ];
+  const outOne = fillColumnStructuralChars(oneTail);
+  eq('仅 1 处「公」列尾时不补位', outOne.find((c) => c.id === 'b2').text, null);
+
+  // 人工确认的漏检列尾不碰（保留用户留空/待定的意图）
+  const manualTail = [
+    mk('m1', 10, 10, '子', 0.9),
+    mk('m2', 10, 50, '公', 0.92),
+    mk('m3', 40, 10, '孫', 0.9),
+    mk('m4', 40, 50, '公', 0.9),
+    mk('m5', 70, 10, '曾', 0.9),
+    mk('m6', 70, 50, null, 0, { edited: true, source: 'manual' }),
+  ];
+  const outManual = fillColumnStructuralChars(manualTail);
+  eq('人工字列尾不补', outManual.find((c) => c.id === 'm6').text, null);
+
+  // 「氏」列尾同样生效（妻名列）
+  const shi = [
+    mk('s1', 10, 10, '王', 0.9),
+    mk('s2', 10, 50, '氏', 0.9),
+    mk('s3', 40, 10, '李', 0.9),
+    mk('s4', 40, 50, '氏', 0.92),
+    mk('s5', 70, 10, '趙', 0.9),
+    mk('s6', 70, 50, null, 0),
+  ];
+  const outShi = fillColumnStructuralChars(shi);
+  eq('妻名列尾补「氏」', outShi.find((c) => c.id === 's6').text, '氏');
+
+  // 单字列不构成列尾（避免把孤立的空字当列尾补）
+  const single = [
+    mk('g1', 10, 10, '子', 0.9),
+    mk('g2', 10, 50, '公', 0.9),
+    mk('g3', 40, 10, '孫', 0.9),
+    mk('g4', 40, 50, '公', 0.9),
+    mk('lone', 70, 50, null, 0), // 独立一列，长度 1
+  ];
+  const outSingle = fillColumnStructuralChars(single);
+  eq('单字孤立列不参与列尾补位', outSingle.find((c) => c.id === 'lone').text, null);
+}
+
 summary('后处理模块测试');

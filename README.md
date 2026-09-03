@@ -17,8 +17,8 @@
 
 - **本地图像处理管线**：投影法去斜、Otsu/Sauvola 二值化、中值去噪、形态学开运算、连通域字符分割（纯 JS 实现，Web Worker 不卡 UI；OpenCV.js 懒加载可选增强）
 - **三级隐私模式**：
-  - **A 模式** — 全本地：Tesseract.js 繁体 OCR，不出网
-  - **B 模式（默认）** — 拼图上云：字符打乱拼成编号网格图再上传，模型看不到版面
+  - **A 模式（默认）** — 全本地：Tesseract.js 繁体 OCR，不出网；首次启动即选中本地模型，免配置开箱即用
+  - **B 模式（遗留）** — 拼图上云：字符打乱拼成编号网格图再上传，模型看不到版面
   - **C 模式** — 整页上云：识别精度最高，原图上云
 - **多厂商识别**：Gemini / OpenAI / Anthropic / 自定义 OpenAI 兼容端点（百炼、智谱、DeepSeek、Ollama…），密钥 AES-GCM 加密、绝不落盘
 - **Canvas 校对台**：双栏联动、撤销/重做（100 步、刷新可恢复）、低置信面板、字号标定
@@ -99,10 +99,10 @@ ZupuScript Web/
 ├── docs/
 │   ├── PRD-v2.0.md                # 产品需求文档（PDF 转 Markdown）
 │   ├── ARCHITECTURE.md            # 架构设计 + 任务分解
-│   ├── TEST-REPORT.md             # QA 测试报告（159/159 通过）
+│   ├── TEST-REPORT.md             # QA 测试报告（159/159 通过，历史快照）
 │   ├── class-diagram.mermaid      # 类图
 │   └── sequence-diagram.mermaid   # 时序图
-├── tests/                         # 5 个测试套件（node --experimental-strip-types 可跑）
+├── tests/                         # 22 个测试套件（473 用例，命令见下方「测试」节）
 └── src/
     ├── main.tsx / App.tsx         # 入口与顶层视图切换
     ├── model/                     # 类型定义 + .zpproj.json 序列化
@@ -124,11 +124,11 @@ ZupuScript Web/
 
 ## 🔑 识别配置（BYOK）
 
-首次识别前需在 **设置** 面板中配置：
+首次启动默认使用**本地模型**（Tesseract，免配置）。需要更高精度时，在 **设置** 面板中配置云端识别：
 
-1. **选择 Provider**：Gemini（推荐，CORS 友好）/ OpenAI / Anthropic / 自定义端点
+1. **选择 Provider**：Gemini（推荐，CORS 友好）/ OpenAI / Anthropic / DeepSeek / 自定义端点
 2. **填入 API Key**：密钥经 Web Crypto **AES-GCM 加密后存 IndexedDB**，支持「仅会话」（关页即毁），**绝不写入项目文件 `.zpproj.json`**
-3. **选择隐私模式**：A 全本地 / B 拼图上云（默认）/ C 整页上云
+3. **选择隐私模式**：A 全本地（默认）/ C 整页上云（选择云端分组时自动切换）
 4. （可选）自定义端点可填**无状态 Edge 代理 URL**解决跨域
 
 > 💡 全应用**唯一的网络出网点**是 `src/recognize/orchestrator.ts`，隐私审计日志可在设置中查看（30 天）。加 URL 参数 `?local=1` 可强制全本地模式。
@@ -150,14 +150,19 @@ ZupuScript Web/
 
 ```bash
 # 运行全部测试套件（无需单测框架，直接可执行）
-node --experimental-strip-types tests/generator.test.mjs
-node --experimental-strip-types tests/calibrate.test.mjs
-node --experimental-strip-types tests/zpproj.test.mjs
-node --experimental-strip-types tests/grid.test.mjs
-node --experimental-strip-types tests/preprocess.test.mjs
+# 注意：--loader 为必需参数，负责 '@/xxx' 别名与无扩展名导入解析，缺失会 MODULE_NOT_FOUND
+node --experimental-strip-types --no-warnings --loader ./tests/alias-loader.mjs tests/generator.test.mjs
+node --experimental-strip-types --no-warnings --loader ./tests/alias-loader.mjs tests/calibrate.test.mjs
+node --experimental-strip-types --no-warnings --loader ./tests/alias-loader.mjs tests/zpproj.test.mjs
+node --experimental-strip-types --no-warnings --loader ./tests/alias-loader.mjs tests/grid.test.mjs
+node --experimental-strip-types --no-warnings --loader ./tests/alias-loader.mjs tests/preprocess.test.mjs
+node --experimental-strip-types --no-warnings --loader ./tests/alias-loader.mjs tests/settings-defaults.test.mjs
+
+# 或一次性跑全部 22 个套件
+for f in tests/*.test.mjs; do node --experimental-strip-types --no-warnings --loader ./tests/alias-loader.mjs "$f"; done
 ```
 
-当前状态：**159 / 159 通过**（详见 `docs/TEST-REPORT.md`）。
+当前状态：**22 套件 / 473 用例全部通过**。generator 套件的 `py_compile` 用例会自动探测 Python（`PY_BIN` 环境变量 → 当前用户 managed python → PATH），无 Python 时优雅跳过。
 
 ---
 

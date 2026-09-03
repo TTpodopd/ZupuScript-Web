@@ -4,6 +4,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, unlinkSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { check, eq, section, summary, makeSamplePage, makeSampleProject } from './helpers.mjs';
@@ -14,7 +15,25 @@ import { lintScript, hasLintError } from '../src/generator/lint.ts';
 import { generatePageScript, generateMergedScript, buildBundle } from '../src/generator/export.ts';
 import { MM_PER_PT } from '../src/lib/constants.ts';
 
-const PY = 'C:/Users/milei/.workbuddy/binaries/python/versions/3.13.12/python.exe';
+// Python 探测：不写死机器路径（历史硬编码 /Users/milei 导致换机即挂）。
+// 顺序：env PY_BIN → 当前用户 managed python → PATH 中的 python/python3。
+function detectPython() {
+  const candidates = [
+    process.env.PY_BIN,
+    path.join(os.homedir(), '.workbuddy/binaries/python/versions/3.13.12/python.exe'),
+    path.join(os.homedir(), '.workbuddy/binaries/python/versions/3.13.12/python'),
+    'python',
+    'python3',
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try {
+      execFileSync(c, ['-c', 'pass'], { stdio: 'pipe' });
+      return c;
+    } catch { /* try next */ }
+  }
+  return null;
+}
+const PY = detectPython();
 const TMP = path.join(path.dirname(fileURLToPath(import.meta.url)), '_tmp_generated.py');
 
 const page = makeSamplePage();
@@ -84,15 +103,19 @@ check('脚本无 CR 字符', !/\r/.test(code));
 
 // (d) py_compile 语法校验
 writeFileSync(TMP, code, 'utf8');
-let pyOk = true;
-let pyErr = '';
-try {
-  execFileSync(PY, ['-m', 'py_compile', TMP], { stdio: 'pipe' });
-} catch (e) {
-  pyOk = false;
-  pyErr = String(e.stderr ?? e.message);
+if (PY) {
+  let pyOk = true;
+  let pyErr = '';
+  try {
+    execFileSync(PY, ['-m', 'py_compile', TMP], { stdio: 'pipe' });
+  } catch (e) {
+    pyOk = false;
+    pyErr = String(e.stderr ?? e.message);
+  }
+  check('python -m py_compile 语法合法', pyOk, pyErr);
+} else {
+  check('python -m py_compile 语法合法（未找到 Python，跳过）', true);
 }
-check('python -m py_compile 语法合法', pyOk, pyErr);
 try { unlinkSync(TMP); } catch { /* ignore */ }
 
 // 多页合并脚本
@@ -103,9 +126,13 @@ check('合并脚本自检通过', merged.ok, merged.issues.map((i) => i.message)
 check('合并脚本按 index 排序（P0_ 在前）', merged.code.indexOf('P0_R000') < merged.code.indexOf('P1_R000'));
 check('合并脚本含 newPage 分页', merged.code.includes('scribus.newPage(-1)'));
 writeFileSync(TMP, merged.code, 'utf8');
-let mergedPyOk = true;
-try { execFileSync(PY, ['-m', 'py_compile', TMP], { stdio: 'pipe' }); } catch { mergedPyOk = false; }
-check('合并脚本 py_compile 语法合法', mergedPyOk);
+if (PY) {
+  let mergedPyOk = true;
+  try { execFileSync(PY, ['-m', 'py_compile', TMP], { stdio: 'pipe' }); } catch { mergedPyOk = false; }
+  check('合并脚本 py_compile 语法合法', mergedPyOk);
+} else {
+  check('合并脚本 py_compile 语法合法（未找到 Python，跳过）', true);
+}
 try { unlinkSync(TMP); } catch { /* ignore */ }
 
 // buildBundle

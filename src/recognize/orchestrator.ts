@@ -19,9 +19,10 @@ import {
   isValidChar,
   RECOGNITION_PROMPT_VERSION,
 } from './prompt';
-import { correctAutomatedZiJieConfusion, markAutomatedHandwrittenRankForReview, normalizeKnownMarginTitleBoxes, parseMarginTitleHint, postprocessItems, repairGenealogySequences } from './postprocess';
+import { correctAutomatedZiJieConfusion, fillColumnStructuralChars, markAutomatedHandwrittenRankForReview, normalizeKnownMarginTitleBoxes, parseMarginTitleHint, postprocessItems, repairGenealogySequences } from './postprocess';
 import { inferProjectMarginTitle } from './projectConsensus';
 import { localOcrChars } from './local/tesseract';
+import { propagateLocalGlyphs } from './glyphCluster';
 import { learnCharacters, recallCharacters } from './memory';
 import type {
   GridBatch,
@@ -407,21 +408,38 @@ export async function recognizePage(
       const done = Math.ceil((doneChars / Math.max(1, total)) * batchCount);
       report(done, detail ? `本地 OCR 初始化：${detail}` : `正在深度识别文字：${doneChars}/${total} 字，已完成多轮投票复核`);
     });
-    for (const c of unresolved) {
+    // 同形传播：全页同形簇（含人工确认与历史识别证据）内，高证据种子 →
+    // 本轮空识别/低置信位置。族谱页内同字重复极多，种子来源分三级：
+    // 人工确认 > OCR 强证据/多点共识 > 族谱字典弱证据。
+    const propagated = propagateLocalGlyphs(page.chars, results, bin, width, height);
+    if (propagated > 0) report(batchCount, `同形传播：${propagated} 个重复字形由页内可信结果回填`);
+    // 本地结果同样过族谱字典后处理（字典提权 0.86 / 候选兜底 0.80 / 孑→子），
+    // 与云端路径对齐：否则「公/氏/王」等高频字只有 Tesseract 裸置信度（0.5–0.6）全部标红。
+    const localItems: RecognizedItem[] = unresolved.map((c, index) => {
       const result = results.get(c.id);
       const rawText = result?.text ?? null;
       const valid = isValidChar(rawText);
-      const text = valid ? rawText : null;
-      const conf = valid ? result?.confidence ?? 0 : 0;
+      return {
+        id: index,
+        char: valid ? rawText : null,
+        confidence: valid ? result?.confidence ?? 0 : 0,
+        candidates: result?.candidates,
+      };
+    });
+    const processedLocal = postprocessItems(localItems, { isGenealogy: true, strictConsensus: false });
+    processedLocal.forEach((item, index) => {
+      const c = unresolved[index];
+      const text = item.char;
+      const conf = item.confidence;
       patch.set(c.id, { text, conf, note: text ? (conf >= CONFIDENCE_THRESHOLD ? 'ok' : 'blurry') : 'empty', source: 'local' });
       glyphDrafts.set(c.id, {
         primary: text,
         modelConfidence: conf,
-        candidates: result?.candidates,
-        routeVotes: result?.agreeingPasses ?? 0,
+        candidates: item.candidates,
+        routeVotes: results.get(c.id)?.agreeingPasses ?? 0,
       });
-    }
-    report(batchCount, '本地深度识别完成：多轮结果已合并，低置信字请在画布校对');
+    });
+    report(batchCount, '本地深度识别完成：多轮结果已合并并经字典提权，低置信字请在画布校对');
   } else if (mode === 'B') {
     /* ---------- 模式 B：字符拼图上云（默认） ---------- */
     const provider = getProvider(cfg.provider);
@@ -631,6 +649,8 @@ export async function recognizePage(
     chars.map(correctAutomatedZiJieConfusion).map(markAutomatedHandwrittenRankForReview),
     { knownMarginTitle: marginTitleHint },
   );
+  // 列尾结构字：人名列尾「公」、妻名列尾「氏」漏检时保守补位
+  chars = fillColumnStructuralChars(chars);
   chars = normalizeKnownMarginTitleBoxes(chars, marginTitleHint, width);
 
   chars = chars.map((c) => {

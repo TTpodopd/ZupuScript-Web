@@ -30,33 +30,39 @@ function shuffledPermutation(n: number): number[] {
 }
 
 /**
+ * 形态学膨胀（正方形核，半径 radius 像素）：墨迹向外扩一圈。
+ * 用途：本地 OCR 渲染变体把木刻细笔画加粗一档，缓解 Tesseract 对细线的漏检。
+ */
+export function dilateBinary(data: Uint8Array, width: number, height: number, radius = 1): Uint8Array {
+  if (radius <= 0 || width === 0 || height === 0) return data;
+  const out = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let v = 0;
+      for (let dy = -radius; dy <= radius && !v; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= height) continue;
+        const row = yy * width;
+        for (let dx = -radius; dx <= radius; dx++) {
+          const xx = x + dx;
+          if (xx >= 0 && xx < width && data[row + xx]) {
+            v = 1;
+            break;
+          }
+        }
+      }
+      out[y * width + x] = v;
+    }
+  }
+  return out;
+}
+
+/**
  * 形态学闭运算（先膨胀后腐蚀，正方形核，半径 radius 像素）。
  * 用途：修补木刻版扫描造成的 1~2px 断笔/缺口，不改变字形轮廓。
  */
 export function closeBinary(data: Uint8Array, width: number, height: number, radius = 1): Uint8Array {
   if (radius <= 0 || width === 0 || height === 0) return data;
-  const dilate = (src: Uint8Array): Uint8Array => {
-    const out = new Uint8Array(width * height);
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        let v = 0;
-        for (let dy = -radius; dy <= radius && !v; dy++) {
-          const yy = y + dy;
-          if (yy < 0 || yy >= height) continue;
-          const row = yy * width;
-          for (let dx = -radius; dx <= radius; dx++) {
-            const xx = x + dx;
-            if (xx >= 0 && xx < width && src[row + xx]) {
-              v = 1;
-              break;
-            }
-          }
-        }
-        out[y * width + x] = v;
-      }
-    }
-    return out;
-  };
   const erode = (src: Uint8Array): Uint8Array => {
     const out = new Uint8Array(width * height);
     for (let y = 0; y < height; y++) {
@@ -82,7 +88,7 @@ export function closeBinary(data: Uint8Array, width: number, height: number, rad
     }
     return out;
   };
-  return erode(dilate(data));
+  return erode(dilateBinary(data, width, height, radius));
 }
 
 /**

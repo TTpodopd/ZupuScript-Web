@@ -197,11 +197,13 @@ interface SettingsState {
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
-      privacyMode: 'C',
-      provider: { provider: 'gemini', model: 'gemini-2.0-flash', endpoint: '', proxyUrl: '' },
+      // 首次启动（无已存设置）默认选中并使用本地模型：免 API Key、零配置开箱即用；
+      // 已有设置经 persist merge 恢复，不受此默认值影响。
+      privacyMode: 'A',
+      provider: { provider: 'local', model: 'local-tesseract', endpoint: '', proxyUrl: '' },
       connections: ensureLocalConnection(DEFAULT_MODEL_CONNECTIONS),
-      activeConnectionId: 'official-gemini',
-      activeModelId: 'gemini-2.0-flash',
+      activeConnectionId: LOCAL_MODEL_CONNECTION_ID,
+      activeModelId: 'local-tesseract',
       concurrency: 3,
       timeoutMs: DEFAULT_TIMEOUT_MS,
       maxRetries: DEFAULT_MAX_RETRIES,
