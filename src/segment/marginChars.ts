@@ -297,7 +297,7 @@ function boxesToMarginChars(
         pt: 0,
         conf: 0,
         note: 'empty' as const,
-        source: 'manual' as const,
+        source: 'local' as const,
         edited: false,
         ...meta,
       };
@@ -405,7 +405,7 @@ function segmentMarginScale(
       pt: 0,
       conf: 0,
       note: 'empty' as const,
-      source: 'manual' as const,
+      source: 'local' as const,
       edited: false,
       ...meta,
     });
@@ -514,7 +514,7 @@ function reconstructMarginDigits(
       pt: 0,
       conf: 0,
       note: 'empty' as const,
-      source: 'manual' as const,
+      source: 'local' as const,
       edited: false,
       group: 'pageno' as const,
       kind: 'side' as const,

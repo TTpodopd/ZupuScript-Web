@@ -1,6 +1,6 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import type { Page } from '@/model/types';
+import type { CharItem, Page } from '@/model/types';
 
 /** shadcn 约定的类名合并工具 */
 export function cn(...inputs: ClassValue[]): string {
@@ -28,6 +28,11 @@ export function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+/** 仅用户亲手确认的字才锁定；自动切出的空框即使 source 曾标成 manual 仍可识别填充 */
+export function isUserLockedChar(char: Pick<CharItem, 'edited' | 'source' | 'text'>): boolean {
+  return char.edited || (char.source === 'manual' && Boolean(char.text));
 }
 
 export function formatBytes(bytes: number): string {

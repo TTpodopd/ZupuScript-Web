@@ -2,7 +2,7 @@
  * 同形指纹聚类与传播回归：
  * - 指纹对位移/粗细微差的容忍度，与不同字形的区分度；
  * - 聚类：同形归簇、异形分簇、空裁剪剔除；
- * - 传播：强种子填空位/提同字置信/覆盖低证据异字；高证据异字、人工字不碰。
+ * - 传播：强种子填空位/提同字置信；结构字「公/氏」不覆盖已有汉字；高证据异字、人工字不碰。
  * 运行：node --experimental-strip-types --no-warnings --loader ./tests/alias-loader.mjs tests/glyph-cluster.test.mjs
  */
 import { check, eq, section, summary } from './helpers.mjs';
@@ -72,7 +72,7 @@ section('聚类：同形归簇、空裁剪剔除');
   eq('L 形独立成簇', lCluster?.length, 1);
 }
 
-section('传播：强种子填空位、提同字、覆盖低证据异字');
+section('传播：强种子填空位、提同字；结构字不覆盖异字');
 {
   const binT = makeBin(24, 24, tGlyph());
   const binShift = makeBin(24, 24, tGlyph(1, 0));
@@ -107,14 +107,40 @@ section('传播：强种子填空位、提同字、覆盖低证据异字');
   const pageChars = chars.map((c, i) => ({ ...c, bbox: bboxes[i] }));
   const results = new Map(pageChars.map((c) => [c.id, { key: c.id, text: c.text, confidence: c.conf, candidates: [] }]));
   const improved = propagateLocalGlyphs(pageChars, results, page, 48, 48);
-  check('传播发生（≥3 处改善）', improved >= 3, `improved=${improved}`);
+  check('传播发生（空位回填 + 同字提权）', improved >= 2, `improved=${improved}`);
   eq('空位 b 填种子字「公」', results.get('b').text, '公');
   check('空位 b 置信 0.88', results.get('b').confidence === 0.88);
   check('同字 c 提至 ≥0.88', results.get('c').confidence >= 0.88);
-  eq('低证据异字 d 被强种子覆盖', results.get('d').text, '公');
+  eq('结构字「公」不覆盖低证据异字 d', results.get('d').text, '松');
   eq('高证据异字 e 保留原字', results.get('e').text, '松');
   eq('人工字 f 不碰', results.get('f').text, '王');
   eq('异形 g（L 形）不被 T 种子覆盖', results.get('g').text, '乙');
+}
+
+section('传播：非结构字强种子仍可覆盖低证据异字；公不覆盖周/氏');
+{
+  const page = makeBin(48, 48, (x, y) => {
+    if (x < 24 && y < 24) return tGlyph()(x, y);
+    return false;
+  });
+  const box = [2, 2, 12, 12];
+  const overwriteChars = [
+    { id: 'seed', bbox: box, edited: false, source: 'local', text: '子', conf: 0.95 },
+    { id: 'weak', bbox: box, edited: false, source: 'local', text: '松', conf: 0.3 },
+  ];
+  const overwriteResults = new Map(overwriteChars.map((c) => [c.id, { key: c.id, text: c.text, confidence: c.conf, candidates: [] }]));
+  propagateLocalGlyphs(overwriteChars, overwriteResults, page, 48, 48);
+  eq('非结构字「子」可覆盖低证据异字', overwriteResults.get('weak').text, '子');
+
+  const structuralChars = [
+    { id: 'gong', bbox: box, edited: false, source: 'local', text: '公', conf: 0.95 },
+    { id: 'zhou', bbox: box, edited: false, source: 'local', text: '周', conf: 0.3 },
+    { id: 'shi', bbox: box, edited: false, source: 'local', text: '氏', conf: 0.2 },
+  ];
+  const structuralResults = new Map(structuralChars.map((c) => [c.id, { key: c.id, text: c.text, confidence: c.conf, candidates: [] }]));
+  propagateLocalGlyphs(structuralChars, structuralResults, page, 48, 48);
+  eq('强公种子不覆盖低置信周', structuralResults.get('zhou').text, '周');
+  eq('强公种子不覆盖低置信氏', structuralResults.get('shi').text, '氏');
 }
 
 section('传播：簇内多点共识种子（无强 OCR）');
@@ -166,6 +192,22 @@ section('传播：历史证据回退（results 未收录时读 c.text）');
   ]);
   propagateLocalGlyphs(chars, results, page, 48, 48);
   eq('历史「公」作为种子回填本轮空位', results.get('n').text, '公');
+}
+
+section('传播：自动空框即使 source=manual 也可回填');
+{
+  const page = makeBin(48, 48, (x, y) => {
+    if (x < 24 && y < 24) return tGlyph()(x, y);
+    if (x >= 24 && y < 24) return tGlyph()(x - 24, y);
+    return false;
+  });
+  const chars = [
+    { id: 'seed', bbox: [2, 2, 12, 12], edited: false, source: 'local', text: '倪', conf: 0.95 },
+    { id: 'emptyAuto', bbox: [26, 2, 36, 12], edited: false, source: 'manual', text: null, conf: 0 },
+  ].map((c) => ({ ...c, kind: 'text', group: 'body', cx: 0, cy: 0, pt: 0, note: 'empty' }));
+  const results = new Map(chars.map((c) => [c.id, { key: c.id, text: c.text, confidence: c.conf, candidates: [] }]));
+  propagateLocalGlyphs(chars, results, page, 48, 48);
+  eq('未编辑的空框可被同形传播填充', results.get('emptyAuto').text, '倪');
 }
 
 section('传播：同级证据冲突跳过整簇');

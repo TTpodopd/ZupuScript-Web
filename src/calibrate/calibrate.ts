@@ -166,8 +166,16 @@ export function calibratePage(
   const autoEntries = page.chars
     .map((char, index) => ({ char, height: inkHeights[index] }))
     .filter(({ char }) => char.kind !== 'side' && char.group === 'body');
-  const autoChars = autoEntries.length > 0 ? autoEntries.map(({ char }) => char) : page.chars;
-  const autoHeights = autoEntries.length > 0 ? autoEntries.map(({ height }) => height) : inkHeights;
+  const bodyMedian = median(autoEntries.map(({ height }) => height).filter((h) => h > 0));
+  const clusteredEntries = bodyMedian > 0
+    ? autoEntries.filter(({ height }) => height >= bodyMedian * 0.7)
+    : autoEntries;
+  const autoChars = clusteredEntries.length > 0
+    ? clusteredEntries.map(({ char }) => char)
+    : autoEntries.length > 0 ? autoEntries.map(({ char }) => char) : page.chars;
+  const autoHeights = clusteredEntries.length > 0
+    ? clusteredEntries.map(({ height }) => height)
+    : autoEntries.length > 0 ? autoEntries.map(({ height }) => height) : inkHeights;
   const heights = clusterCharHeights(autoChars, autoHeights);
   const fontSizes: FontSizes = { body: 0, title: 0, pageno: 0, rank: 0 };
 
@@ -184,6 +192,7 @@ export function calibratePage(
     if (c.kind === 'side') return c.group === 'title' ? 'title' : 'pageno';
     if (c.group !== 'body') return c.group;
     const h = inkHeights[idx] ?? c.bbox[3] - c.bbox[1];
+    if (bodyMedian > 0 && h < bodyMedian * 0.7) return 'body';
     let bestRank = 0;
     let bestDist = Infinity;
     heights.forEach((rep, rank) => {
@@ -199,7 +208,11 @@ export function calibratePage(
   // 对每个语义组单独取真实墨迹高度中位数。标题框的 padding、断笔和正文数量
   // 不再共同拉高或压低字号，四字书名与右侧世次标题会得到各自稳定字号。
   for (const group of ['body', 'title', 'rank'] as const) {
-    const measured = inkHeights.filter((height, index) => groups[index] === group && height > 0);
+    const measured = inkHeights.filter((height, index) => (
+      groups[index] === group
+      && height > 0
+      && (group !== 'body' || bodyMedian <= 0 || height >= bodyMedian * 0.7)
+    ));
     if (measured.length > 0) {
       fontSizes[group] = Math.round(charHeightToPt(median(measured), pxPerMm) * 10) / 10;
     }

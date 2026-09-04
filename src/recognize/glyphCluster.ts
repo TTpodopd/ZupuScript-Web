@@ -15,12 +15,15 @@
  */
 import { cropBinary } from '@/imaging/raster';
 import { closeBinary, dilateBinary, scaleCoverage } from '@/segment/grid';
-import { CONFIDENCE_THRESHOLD, DICT_CANDIDATE_CONF, DICT_LOW_CONF_MAX } from '@/lib/constants';
+import { COLUMN_END_STRUCTURAL_CHARS, CONFIDENCE_THRESHOLD, DICT_CANDIDATE_CONF, DICT_LOW_CONF_MAX } from '@/lib/constants';
 import { isSurnameChar } from './dict/surnames';
 import { isDictChar } from './dict/genealogy';
 import { isCjkGlyph } from './prompt';
+import { isUserLockedChar } from '@/lib/utils';
 import type { CharItem } from '@/model/types';
 import type { LocalOcrResult } from './local/tesseract';
+
+const STRUCTURAL_SEED_CHARS = new Set<string>(COLUMN_END_STRUCTURAL_CHARS);
 
 export const FINGERPRINT_SIZE = 16;
 /** 16×16=256 位中允许的最大差异位数（≈22%）：1px 分割抖动在下采样后 ≤1 格，配合低分辨率膨胀可吸收 */
@@ -93,7 +96,7 @@ interface GlyphSeed {
  * 目标仅限本轮识别结果（results 内）且非人工字：
  * - 空识别：填种子字，conf = 0.88 / 0.86 / 0.80（按 tier）；
  * - 同字低置信：conf 提至 max(0.88, 原+0.35)，上限 0.95；
- * - 异字且 conf<0.5：仅 tier1/2 可覆盖（conf 0.85）；
+ * - 异字且 conf<0.5：仅 tier1/2 可覆盖（conf 0.85）；结构字「公/氏」只填空框，不覆盖已有汉字；
  * - conf≥0.5 的异字、conf≥0.85 的结果：一律不碰。
  * 返回被改善的位置数。
  */
@@ -111,7 +114,7 @@ export function propagateLocalGlyphs(
   const readEvidence = (c: CharItem): { text: string | null; confidence: number } => {
     const r = results.get(c.id);
     if (r) return { text: r.text, confidence: r.confidence };
-    if (!c.edited && c.source !== 'manual') return { text: c.text, confidence: c.conf };
+    if (!isUserLockedChar(c)) return { text: c.text, confidence: c.conf };
     return { text: null, confidence: 0 };
   };
   for (const members of clusters) {
@@ -120,12 +123,12 @@ export function propagateLocalGlyphs(
     // tier1a：人工确认/已编辑（同簇内即视作该字形的权威标注）
     for (const i of members) {
       const c = allChars[i];
-      if ((c.edited || c.source === 'manual') && c.text && isCjkGlyph(c.text)) evidence.push({ text: c.text, tier: 1 });
+      if (isUserLockedChar(c) && c.text && isCjkGlyph(c.text)) evidence.push({ text: c.text, tier: 1 });
     }
     // tier1b：OCR 强结果（本轮或历史）
     for (const i of members) {
       const c = allChars[i];
-      if (c.edited || c.source === 'manual') continue;
+      if (isUserLockedChar(c)) continue;
       const e = readEvidence(c);
       if (e.text && e.confidence >= CONFIDENCE_THRESHOLD) evidence.push({ text: e.text, tier: 1 });
     }
@@ -133,7 +136,7 @@ export function propagateLocalGlyphs(
     const counts = new Map<string, number>();
     for (const i of members) {
       const c = allChars[i];
-      if (c.edited || c.source === 'manual') continue;
+      if (isUserLockedChar(c)) continue;
       const e = readEvidence(c);
       if (e.text && e.confidence >= DICT_LOW_CONF_MAX) counts.set(e.text, (counts.get(e.text) ?? 0) + 1);
     }
@@ -141,7 +144,7 @@ export function propagateLocalGlyphs(
     // tier3：字典弱证据
     for (const i of members) {
       const c = allChars[i];
-      if (c.edited || c.source === 'manual') continue;
+      if (isUserLockedChar(c)) continue;
       const e = readEvidence(c);
       if (e.text && e.confidence >= DICT_LOW_CONF_MAX && e.confidence < CONFIDENCE_THRESHOLD && (isSurnameChar(e.text) || isDictChar(e.text))) {
         evidence.push({ text: e.text, tier: 3 });
@@ -155,7 +158,7 @@ export function propagateLocalGlyphs(
     const seed = { text: bestTexts[0], tier: bestTier };
     for (const i of members) {
       const c = allChars[i];
-      if (c.edited || c.source === 'manual') continue;
+      if (isUserLockedChar(c)) continue;
       const target = results.get(c.id);
       if (!target || target.confidence >= CONFIDENCE_THRESHOLD) continue;
       if (target.text === null) {
@@ -166,10 +169,14 @@ export function propagateLocalGlyphs(
       } else if (target.text === seed.text) {
         target.confidence = Math.min(0.95, Math.max(0.88, target.confidence + 0.35));
         improved += 1;
-      } else if (target.confidence < DICT_LOW_CONF_MAX && bestTier <= 2) {
+      } else if (
+        target.confidence < DICT_LOW_CONF_MAX
+        && bestTier <= 2
+        && !STRUCTURAL_SEED_CHARS.has(seed.text)
+      ) {
+        target.candidates = [seed.text, target.text, ...target.candidates].slice(0, 3);
         target.text = seed.text;
         target.confidence = 0.85;
-        target.candidates = [seed.text, target.text, ...target.candidates].slice(0, 3);
         improved += 1;
       }
     }

@@ -48,6 +48,8 @@ export const DICT_HIT_CONF = 0.86;
 export const DICT_CANDIDATE_CONF = 0.8;
 /** 视为「极低置信」的上限：低于此值才考虑采用 candidates 首候选 */
 export const DICT_LOW_CONF_MAX = 0.5;
+/** 竖排列尾结构字：人名「公」、妻名「氏」。补位与同形传播不得跨语义复制 */
+export const COLUMN_END_STRUCTURAL_CHARS = ['氏', '公'] as const;
 /** 大模型 max_tokens 动态系数（约每字 40 token，防整批 JSON 截断） */
 export const TOKENS_PER_CHAR = 40;
 
@@ -65,6 +67,8 @@ export const CHAR_MIN_SIZE = 6;
 export const CHAR_MAX_SIZE = 400;
 /** 小连通域最小面积（字符分割） */
 export const CHAR_MIN_AREA = 20;
+/** 相对本页典型字边长的下限：节点圆残墨/接头不得小于此比例 */
+export const CHAR_MIN_REL_SIDE = 0.55;
 /** 字号聚类相对容差 15%（PDF S7.1） */
 export const FONT_CLUSTER_REL_TOL = 0.15;
 /** 粘连拆分：相对典型字面积阈值（PDF S1.2） */

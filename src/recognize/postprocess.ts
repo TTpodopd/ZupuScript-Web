@@ -3,14 +3,14 @@
  * 在 orchestrator 校验通过后、写回 CharItem 前调用。
  * 约束：保留原字形（"保留原字形"硬规则），仅消歧不改正字。
  */
-import { DICT_CANDIDATE_CONF, DICT_HIT_CONF, DICT_LOW_CONF_MAX } from '@/lib/constants';
+import { COLUMN_END_STRUCTURAL_CHARS, DICT_CANDIDATE_CONF, DICT_HIT_CONF, DICT_LOW_CONF_MAX } from '@/lib/constants';
 import { isSurnameChar } from './dict/surnames';
 import { isDictChar } from './dict/genealogy';
 import { isVariant, normalizeVariant } from './dict/variants';
 import { isCjkGlyph, sanitizeCharOutput } from './prompt';
 import type { CharItem, CharNote } from '@/model/types';
 import type { RecognizedItem } from './types';
-import { median } from '@/lib/utils';
+import { isUserLockedChar, median } from '@/lib/utils';
 
 export interface PostprocessContext {
   /** 本页是否为竖排族谱（影响是否启用高频词先验提权） */
@@ -102,7 +102,7 @@ export function postprocessItems(
  */
 export function correctAutomatedZiJieConfusion(char: CharItem): CharItem {
   if (char.text !== '孑') return char;
-  if (char.edited || char.source === 'manual') return char;
+  if (isUserLockedChar(char)) return char;
   if (char.group !== 'body' && char.group !== 'rank') return char;
   // 已通过三轮共识且字形回验正常的结果优先于词频规则，避免把真实的
   // 罕见字强行改成常用「子」。
@@ -117,7 +117,7 @@ export function correctAutomatedZiJieConfusion(char: CharItem): CharItem {
 
 /** 手写排行标签采用更保守的校对阈值，不改识别文字，仅确保弱证据结果进入人工校对。 */
 export function markAutomatedHandwrittenRankForReview(char: CharItem): CharItem {
-  if (char.group !== 'rank' || char.edited || char.source === 'manual') return char;
+  if (char.group !== 'rank' || isUserLockedChar(char)) return char;
   if (char.conf >= 0.9) return char;
   return {
     ...char,
@@ -128,42 +128,94 @@ export function markAutomatedHandwrittenRankForReview(char: CharItem): CharItem 
 
 const RANK_PREFIXES = new Set(['長', '长', '次', '三', '四', '五', '六', '七', '八', '九', '十']);
 const RANK_SON_CONFUSIONS = new Set(['孑', '予', '于', '了', '丁']);
+const STRUCTURAL_CHAR_SET = new Set<string>(COLUMN_END_STRUCTURAL_CHARS);
 
-/** 竖排列尾结构性字：人名列尾「公」、姓后「氏」。只补列尾，绝不碰列中的人名位 */
-const COLUMN_END_STRUCTURAL_CHARS = new Set(['氏', '公']);
+function applyStructuralFill(char: CharItem, text: '公' | '氏'): void {
+  char.text = text;
+  char.conf = Math.max(char.conf, DICT_CANDIDATE_CONF);
+  char.note = char.note === 'empty' ? 'blurry' : char.note;
+}
+
+/** 妻名左侧姓：命中姓氏表，但排除「公/氏」（复姓「公孫」会把「公」拆进单字表） */
+function isWifeSurname(text: string | null): boolean {
+  return text !== null && isSurnameChar(text) && !STRUCTURAL_CHAR_SET.has(text);
+}
 
 /**
  * 列尾结构字保守补位：按 x 对齐分竖列，取每列最末（cy 最大）字符。
- * 若全页 ≥2 列的列尾已识别为某结构字（「公」/「氏」），则列尾为空/低置信
- * （<0.5）的列补该字（conf 0.80）。
- * 典型场景：多数人名列以「公」收尾、妻名列以「氏」收尾，个别列尾漏检。
- * 列尾之外任何位置不碰；manual/edited 不碰；已有 ≥0.5 证据的异字不覆盖。
+ * 全页 ≥2 处同类列尾证据仍是前提，但每列必须看本地上下文，禁止把「公」
+ * 广播到妻名行（「周氏/江氏/楊氏」）或「金氏」的姓氏位。
+ *
+ * 列内判定：
+ * - 列中 tail 之上已有「公」→ 不再填「公」（下方是妻名/下一字）
+ * - 倒数第二字是姓氏，且同行已有「氏」或横向成对 → 只许补「氏」
+ * - 与「氏」横向成对 → 该框是姓氏位，两字都不填「公」
+ * - 与姓氏横向成对 → 该框是「氏」位
+ * - 「公」「氏」互不覆盖；manual/edited、列中人名、≥0.5 异字不碰
  */
 export function fillColumnStructuralChars(chars: CharItem[]): CharItem[] {
   const out = chars.map((c) => ({ ...c }));
   const textChars = out.filter((c) => c.kind === 'text');
   if (textChars.length === 0) return out;
   const typicalWidth = median(textChars.map((c) => c.bbox[2] - c.bbox[0])) || 20;
+  const typicalHeight = median(textChars.map((c) => c.bbox[3] - c.bbox[1])) || 20;
   const columns: CharItem[][] = [];
   for (const c of [...textChars].sort((a, b) => a.cx - b.cx || a.cy - b.cy)) {
     const col = columns.find((items) => Math.abs(median(items.map((i) => i.cx)) - c.cx) <= typicalWidth * 0.5);
     if (col) col.push(c);
     else columns.push([c]);
   }
-  const tails = columns
+  const orderedCols = columns
     .filter((col) => col.length >= 2)
-    .map((col) => [...col].sort((a, b) => a.cy - b.cy)[col.length - 1]);
-  for (const structural of COLUMN_END_STRUCTURAL_CHARS) {
-    const confirmedTails = tails.filter((c) => c.text === structural);
-    if (confirmedTails.length < 2) continue;
-    for (const tail of tails) {
-      if (tail.edited || tail.source === 'manual') continue;
-      if (tail.text === structural) continue;
-      if (tail.text !== null && tail.conf >= DICT_LOW_CONF_MAX) continue;
-      tail.text = structural;
-      tail.conf = Math.max(tail.conf, DICT_CANDIDATE_CONF);
-      tail.note = tail.note === 'empty' ? 'blurry' : tail.note;
+    .map((col) => [...col].sort((a, b) => a.cy - b.cy));
+  const tails = orderedCols.map((col) => col[col.length - 1]);
+  const confirmedGong = tails.filter((c) => c.text === '公').length;
+  const confirmedShi = tails.filter((c) => c.text === '氏').length;
+  const shiChars = textChars.filter((c) => c.text === '氏');
+  const shiBandCount = (y: number) =>
+    shiChars.filter((c) => Math.abs(c.cy - y) <= typicalHeight * 0.45).length;
+  const horizontalNeighbors = (char: CharItem) =>
+    textChars.filter((other) => {
+      if (other.id === char.id) return false;
+      const dy = Math.abs(other.cy - char.cy);
+      const dx = Math.abs(other.cx - char.cx);
+      return dy <= typicalHeight * 0.45 && dx > typicalWidth * 0.35 && dx <= typicalWidth * 1.6;
+    });
+
+  for (const col of orderedCols) {
+    const tail = col[col.length - 1];
+    const prev = col[col.length - 2];
+    if (isUserLockedChar(tail)) continue;
+    if (tail.text !== null && STRUCTURAL_CHAR_SET.has(tail.text)) continue;
+    if (tail.text !== null && tail.conf >= DICT_LOW_CONF_MAX) continue;
+    if (tail.text !== null && isWifeSurname(tail.text)) continue;
+
+    const above = col.slice(0, -1);
+    const hasGongAbove = above.some((c) => c.text === '公');
+    const neighbors = horizontalNeighbors(tail);
+    const pairedWithShi = neighbors.some((n) => n.text === '氏');
+    const surnameOnLeft = neighbors.some((n) => n.cx < tail.cx && isWifeSurname(n.text));
+    const prevIsSurname = isWifeSurname(prev.text);
+    const shiInBand = shiBandCount(tail.cy) >= 2;
+    const isShiSlot = surnameOnLeft || (prevIsSurname && (shiInBand || pairedWithShi));
+    const shiEvidence = confirmedShi >= 2 || shiInBand || surnameOnLeft;
+    const gongEvidence = confirmedGong >= 2;
+
+    if (isShiSlot && shiEvidence) {
+      applyStructuralFill(tail, '氏');
+      continue;
     }
+    if (hasGongAbove || pairedWithShi || isShiSlot || shiInBand) continue;
+    if (gongEvidence) applyStructuralFill(tail, '公');
+  }
+
+  for (const char of textChars) {
+    if (isUserLockedChar(char) || char.text !== null) continue;
+    const neighbors = horizontalNeighbors(char);
+    const surnameOnLeft = neighbors.some((n) => n.cx < char.cx && isWifeSurname(n.text));
+    const shiOnRight = neighbors.some((n) => n.cx > char.cx && n.text === '氏');
+    if (!surnameOnLeft || shiOnRight) continue;
+    if (confirmedShi >= 2 || shiBandCount(char.cy) >= 1) applyStructuralFill(char, '氏');
   }
   return out;
 }
@@ -213,7 +265,7 @@ export function repairGenealogySequences(chars: CharItem[], options?: GenealogyR
       if (
         second.text === '子'
         && !first.edited
-        && first.source !== 'manual'
+        && !isUserLockedChar(first)
         && (first.text === null || first.text === '一' || first.conf < DICT_LOW_CONF_MAX)
       ) {
         first.text = '三';
@@ -221,14 +273,14 @@ export function repairGenealogySequences(chars: CharItem[], options?: GenealogyR
         first.note = 'blurry';
       }
       if (!RANK_PREFIXES.has(first.text ?? '')) continue;
-      if (!first.edited && first.source !== 'manual' && first.text === '长') {
+      if (!isUserLockedChar(first) && first.text === '长') {
         first.text = '長';
         first.conf = Math.max(first.conf, DICT_CANDIDATE_CONF);
       }
       const weakSecond = second.text === null
         || RANK_SON_CONFUSIONS.has(second.text)
         || (second.text !== '子' && second.conf < DICT_LOW_CONF_MAX);
-      if (!weakSecond || second.edited || second.source === 'manual') continue;
+      if (!weakSecond || isUserLockedChar(second)) continue;
       second.text = '子';
       second.conf = Math.max(second.conf, DICT_CANDIDATE_CONF);
       second.note = 'blurry';
@@ -248,7 +300,7 @@ export function repairGenealogySequences(chars: CharItem[], options?: GenealogyR
     const ordered = [...column].sort((a, b) => a.cy - b.cy);
     if (ordered.length !== 3 || ordered[1].text !== '世' || ordered[2].text !== '祖') continue;
     const first = ordered[0];
-    if (!first.edited && first.source !== 'manual' && (first.text === null || first.text === '一' || first.conf < DICT_LOW_CONF_MAX)) {
+    if (!isUserLockedChar(first) && (first.text === null || first.text === '一' || first.conf < DICT_LOW_CONF_MAX)) {
       first.text = '三';
       first.conf = Math.max(first.conf, DICT_CANDIDATE_CONF);
       first.note = 'blurry';
@@ -282,7 +334,7 @@ export function repairGenealogySequences(chars: CharItem[], options?: GenealogyR
         && (matches > 0 || firstGlyph === null || (ordered[0]?.conf ?? 1) < DICT_LOW_CONF_MAX);
       if (matches < 2 && !forceFixedNiTitle) continue;
       ordered.forEach((char, index) => {
-        if (char.edited || char.source === 'manual') return;
+        if (isUserLockedChar(char)) return;
         if (char.text === titleGlyphs[index]) return;
         if (!forceFixedNiTitle && char.text !== null && char.conf >= DICT_HIT_CONF) return;
         char.text = titleGlyphs[index];
