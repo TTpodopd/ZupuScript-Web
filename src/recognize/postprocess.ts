@@ -10,7 +10,7 @@ import { isVariant, normalizeVariant } from './dict/variants';
 import { isCjkGlyph, sanitizeCharOutput } from './prompt';
 import type { CharItem, CharNote } from '@/model/types';
 import type { RecognizedItem } from './types';
-import { median } from '@/lib/utils';
+import { isUserLockedChar, median } from '@/lib/utils';
 
 export interface PostprocessContext {
   /** 本页是否为竖排族谱（影响是否启用高频词先验提权） */
@@ -102,7 +102,7 @@ export function postprocessItems(
  */
 export function correctAutomatedZiJieConfusion(char: CharItem): CharItem {
   if (char.text !== '孑') return char;
-  if (char.edited || char.source === 'manual') return char;
+  if (isUserLockedChar(char)) return char;
   if (char.group !== 'body' && char.group !== 'rank') return char;
   // 已通过三轮共识且字形回验正常的结果优先于词频规则，避免把真实的
   // 罕见字强行改成常用「子」。
@@ -117,7 +117,7 @@ export function correctAutomatedZiJieConfusion(char: CharItem): CharItem {
 
 /** 手写排行标签采用更保守的校对阈值，不改识别文字，仅确保弱证据结果进入人工校对。 */
 export function markAutomatedHandwrittenRankForReview(char: CharItem): CharItem {
-  if (char.group !== 'rank' || char.edited || char.source === 'manual') return char;
+  if (char.group !== 'rank' || isUserLockedChar(char)) return char;
   if (char.conf >= 0.9) return char;
   return {
     ...char,
@@ -185,7 +185,7 @@ export function fillColumnStructuralChars(chars: CharItem[]): CharItem[] {
   for (const col of orderedCols) {
     const tail = col[col.length - 1];
     const prev = col[col.length - 2];
-    if (tail.edited || tail.source === 'manual') continue;
+    if (isUserLockedChar(tail)) continue;
     if (tail.text !== null && STRUCTURAL_CHAR_SET.has(tail.text)) continue;
     if (tail.text !== null && tail.conf >= DICT_LOW_CONF_MAX) continue;
     if (tail.text !== null && isWifeSurname(tail.text)) continue;
@@ -210,7 +210,7 @@ export function fillColumnStructuralChars(chars: CharItem[]): CharItem[] {
   }
 
   for (const char of textChars) {
-    if (char.edited || char.source === 'manual' || char.text !== null) continue;
+    if (isUserLockedChar(char) || char.text !== null) continue;
     const neighbors = horizontalNeighbors(char);
     const surnameOnLeft = neighbors.some((n) => n.cx < char.cx && isWifeSurname(n.text));
     const shiOnRight = neighbors.some((n) => n.cx > char.cx && n.text === '氏');
@@ -265,7 +265,7 @@ export function repairGenealogySequences(chars: CharItem[], options?: GenealogyR
       if (
         second.text === '子'
         && !first.edited
-        && first.source !== 'manual'
+        && !isUserLockedChar(first)
         && (first.text === null || first.text === '一' || first.conf < DICT_LOW_CONF_MAX)
       ) {
         first.text = '三';
@@ -273,14 +273,14 @@ export function repairGenealogySequences(chars: CharItem[], options?: GenealogyR
         first.note = 'blurry';
       }
       if (!RANK_PREFIXES.has(first.text ?? '')) continue;
-      if (!first.edited && first.source !== 'manual' && first.text === '长') {
+      if (!isUserLockedChar(first) && first.text === '长') {
         first.text = '長';
         first.conf = Math.max(first.conf, DICT_CANDIDATE_CONF);
       }
       const weakSecond = second.text === null
         || RANK_SON_CONFUSIONS.has(second.text)
         || (second.text !== '子' && second.conf < DICT_LOW_CONF_MAX);
-      if (!weakSecond || second.edited || second.source === 'manual') continue;
+      if (!weakSecond || isUserLockedChar(second)) continue;
       second.text = '子';
       second.conf = Math.max(second.conf, DICT_CANDIDATE_CONF);
       second.note = 'blurry';
@@ -300,7 +300,7 @@ export function repairGenealogySequences(chars: CharItem[], options?: GenealogyR
     const ordered = [...column].sort((a, b) => a.cy - b.cy);
     if (ordered.length !== 3 || ordered[1].text !== '世' || ordered[2].text !== '祖') continue;
     const first = ordered[0];
-    if (!first.edited && first.source !== 'manual' && (first.text === null || first.text === '一' || first.conf < DICT_LOW_CONF_MAX)) {
+    if (!isUserLockedChar(first) && (first.text === null || first.text === '一' || first.conf < DICT_LOW_CONF_MAX)) {
       first.text = '三';
       first.conf = Math.max(first.conf, DICT_CANDIDATE_CONF);
       first.note = 'blurry';
@@ -334,7 +334,7 @@ export function repairGenealogySequences(chars: CharItem[], options?: GenealogyR
         && (matches > 0 || firstGlyph === null || (ordered[0]?.conf ?? 1) < DICT_LOW_CONF_MAX);
       if (matches < 2 && !forceFixedNiTitle) continue;
       ordered.forEach((char, index) => {
-        if (char.edited || char.source === 'manual') return;
+        if (isUserLockedChar(char)) return;
         if (char.text === titleGlyphs[index]) return;
         if (!forceFixedNiTitle && char.text !== null && char.conf >= DICT_HIT_CONF) return;
         char.text = titleGlyphs[index];

@@ -19,6 +19,7 @@ import { COLUMN_END_STRUCTURAL_CHARS, CONFIDENCE_THRESHOLD, DICT_CANDIDATE_CONF,
 import { isSurnameChar } from './dict/surnames';
 import { isDictChar } from './dict/genealogy';
 import { isCjkGlyph } from './prompt';
+import { isUserLockedChar } from '@/lib/utils';
 import type { CharItem } from '@/model/types';
 import type { LocalOcrResult } from './local/tesseract';
 
@@ -113,7 +114,7 @@ export function propagateLocalGlyphs(
   const readEvidence = (c: CharItem): { text: string | null; confidence: number } => {
     const r = results.get(c.id);
     if (r) return { text: r.text, confidence: r.confidence };
-    if (!c.edited && c.source !== 'manual') return { text: c.text, confidence: c.conf };
+    if (!isUserLockedChar(c)) return { text: c.text, confidence: c.conf };
     return { text: null, confidence: 0 };
   };
   for (const members of clusters) {
@@ -122,12 +123,12 @@ export function propagateLocalGlyphs(
     // tier1a：人工确认/已编辑（同簇内即视作该字形的权威标注）
     for (const i of members) {
       const c = allChars[i];
-      if ((c.edited || c.source === 'manual') && c.text && isCjkGlyph(c.text)) evidence.push({ text: c.text, tier: 1 });
+      if (isUserLockedChar(c) && c.text && isCjkGlyph(c.text)) evidence.push({ text: c.text, tier: 1 });
     }
     // tier1b：OCR 强结果（本轮或历史）
     for (const i of members) {
       const c = allChars[i];
-      if (c.edited || c.source === 'manual') continue;
+      if (isUserLockedChar(c)) continue;
       const e = readEvidence(c);
       if (e.text && e.confidence >= CONFIDENCE_THRESHOLD) evidence.push({ text: e.text, tier: 1 });
     }
@@ -135,7 +136,7 @@ export function propagateLocalGlyphs(
     const counts = new Map<string, number>();
     for (const i of members) {
       const c = allChars[i];
-      if (c.edited || c.source === 'manual') continue;
+      if (isUserLockedChar(c)) continue;
       const e = readEvidence(c);
       if (e.text && e.confidence >= DICT_LOW_CONF_MAX) counts.set(e.text, (counts.get(e.text) ?? 0) + 1);
     }
@@ -143,7 +144,7 @@ export function propagateLocalGlyphs(
     // tier3：字典弱证据
     for (const i of members) {
       const c = allChars[i];
-      if (c.edited || c.source === 'manual') continue;
+      if (isUserLockedChar(c)) continue;
       const e = readEvidence(c);
       if (e.text && e.confidence >= DICT_LOW_CONF_MAX && e.confidence < CONFIDENCE_THRESHOLD && (isSurnameChar(e.text) || isDictChar(e.text))) {
         evidence.push({ text: e.text, tier: 3 });
@@ -157,7 +158,7 @@ export function propagateLocalGlyphs(
     const seed = { text: bestTexts[0], tier: bestTier };
     for (const i of members) {
       const c = allChars[i];
-      if (c.edited || c.source === 'manual') continue;
+      if (isUserLockedChar(c)) continue;
       const target = results.get(c.id);
       if (!target || target.confidence >= CONFIDENCE_THRESHOLD) continue;
       if (target.text === null) {

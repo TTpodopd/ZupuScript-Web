@@ -205,6 +205,12 @@ section('节点圆残弧过滤');
   block(innerBin, 160, 94, 94, 12, 12);
   const innerChar = { ...arcChar, id: 'inner-glyph', bbox: [94, 94, 106, 106], cx: 100, cy: 100 };
   eq('圆内字保留', filterResidualLineChars([innerChar], [], 18, innerBin, 160, 160, nodeEvidence).length, 1);
+
+  const speckBin = new Uint8Array(160 * 160);
+  block(speckBin, 160, 97, 97, 6, 6);
+  const speckChar = { ...arcChar, id: 'node-speck', bbox: [97, 97, 103, 103], cx: 100, cy: 100 };
+  eq('贴节点的过小残墨被移除', filterResidualLineChars([speckChar], [], 18, speckBin, 160, 160, nodeEvidence).length, 0);
+  eq('远离节点的同尺寸残墨保留给后续噪声规则', filterResidualLineChars([{ ...speckChar, id: 'far-speck', cx: 30, cy: 30, bbox: [27, 27, 33, 33] }], [], 18, speckBin, 160, 160, nodeEvidence).length, 1);
 }
 
 section('端到端：节点圆残弧不产生噪声框');
@@ -227,6 +233,7 @@ section('端到端：节点圆残弧不产生噪声框');
   const withNodes = segmentChars(nBin, nW, nH, nLines, [], [], { nodes: nNodes });
   eq('正文真字保留', withNodes.filter((c) => c.cx < 100).length, 1);
   eq('提供节点证据后无残弧噪声框', withNodes.filter((c) => c.cx > 100).length, 0);
+  check('自动切出的字框 source 为 local', withNodes.every((c) => c.source === 'local' && c.edited === false));
 
   const withoutNodes = segmentChars(nBin, nW, nH, nLines);
   check('对照：无节点证据时残弧确会产生噪声框', withoutNodes.filter((c) => c.cx > 100).length > 0);

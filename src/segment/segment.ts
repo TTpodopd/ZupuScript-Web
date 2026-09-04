@@ -8,6 +8,7 @@ import {
   CHAR_MERGE_OVERLAP_MIN,
   CHAR_MERGE_REL_AREA_MAX,
   CHAR_MIN_AREA,
+  CHAR_MIN_REL_SIDE,
   CHAR_MIN_SIZE,
   CHAR_SPLIT_REL_AREA,
 } from '@/lib/constants';
@@ -70,7 +71,7 @@ function boxToCharItem(
     pt: 0,
     conf: 0,
     note: b.wasSplit ? ('split' as const) : b.wasMerge ? ('merge' as const) : ('empty' as const),
-    source: 'manual' as const,
+    source: 'local' as const,
     edited: false,
     group: 'body' as const,
     kind: 'text' as const,
@@ -394,7 +395,7 @@ function supplementMissedChars(
       pt: 0,
       conf: 0,
       note: 'empty' as const,
-      source: 'manual' as const,
+      source: 'local' as const,
       edited: false,
       group: 'body' as const,
       kind: 'text' as const,
@@ -575,10 +576,16 @@ export function filterResidualLineChars(
         }
       }
       if (maxX >= minX) {
-        // 节点圆残弧：墨迹主体（≥70%）落在检出节点圆的环带上 → 圆环被擦线切割后的残留。
-        // 圆内/圆旁的真实汉字不与环带重合，不受影响。
-        if (nodes && nodes.length > 0 && ringInkFraction(bin, width, minX, minY, maxX, maxY, nodes) >= 0.7) {
-          return false;
+        // 节点圆残弧：墨迹主体落在检出节点圆的环带上，或贴着节点但远小于本页字号。
+        // 圆内/圆旁的真实汉字不与环带重合，也不满足「过小」条件，不受影响。
+        if (nodes && nodes.length > 0) {
+          if (ringInkFraction(bin, width, minX, minY, maxX, maxY, nodes) >= 0.55) return false;
+          const short = Math.min(maxX - minX + 1, maxY - minY + 1);
+          const nearNode = nodes.some((node) => {
+            const reach = node.r + Math.max(3, typicalSide * 0.35);
+            return Math.hypot(char.cx - node.cx, char.cy - node.cy) <= reach;
+          });
+          if (nearNode && short < typicalSide * CHAR_MIN_REL_SIDE) return false;
         }
         const iw = maxX - minX + 1;
         const ih = maxY - minY + 1;

@@ -194,6 +194,22 @@ section('传播：历史证据回退（results 未收录时读 c.text）');
   eq('历史「公」作为种子回填本轮空位', results.get('n').text, '公');
 }
 
+section('传播：自动空框即使 source=manual 也可回填');
+{
+  const page = makeBin(48, 48, (x, y) => {
+    if (x < 24 && y < 24) return tGlyph()(x, y);
+    if (x >= 24 && y < 24) return tGlyph()(x - 24, y);
+    return false;
+  });
+  const chars = [
+    { id: 'seed', bbox: [2, 2, 12, 12], edited: false, source: 'local', text: '倪', conf: 0.95 },
+    { id: 'emptyAuto', bbox: [26, 2, 36, 12], edited: false, source: 'manual', text: null, conf: 0 },
+  ].map((c) => ({ ...c, kind: 'text', group: 'body', cx: 0, cy: 0, pt: 0, note: 'empty' }));
+  const results = new Map(chars.map((c) => [c.id, { key: c.id, text: c.text, confidence: c.conf, candidates: [] }]));
+  propagateLocalGlyphs(chars, results, page, 48, 48);
+  eq('未编辑的空框可被同形传播填充', results.get('emptyAuto').text, '倪');
+}
+
 section('传播：同级证据冲突跳过整簇');
 {
   // 人工「王」与强 OCR「公」同簇（指纹误并异形）→ 保守跳过，谁都不改

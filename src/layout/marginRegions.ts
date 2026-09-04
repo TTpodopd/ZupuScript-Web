@@ -281,7 +281,7 @@ export function applyLeftMarginPageNumbers(
       bbox: [candidate.x0, candidate.y0, candidate.x1, candidate.y1],
       conf: 0,
       note: 'empty',
-      source: 'manual',
+      source: 'local',
       edited: false,
       group: 'pageno',
       kind: 'side',
@@ -291,7 +291,7 @@ export function applyLeftMarginPageNumbers(
       id: uuid(), pt: 0,
       text: null, cx: candidate.cx, cy: candidate.cy,
       bbox: [candidate.x0, candidate.y0, candidate.x1, candidate.y1],
-      conf: 0, note: 'empty', source: 'manual', edited: false, group: 'pageno', kind: 'side',
+      conf: 0, note: 'empty', source: 'local', edited: false, group: 'pageno', kind: 'side',
       ...value,
     } as CharItem);
   }
@@ -556,7 +556,7 @@ export function rebuildLeftMarginTextRegions(
     out.push({
       id: uuid(), text: null, cx, cy,
       bbox: [cx - halfW - pad, cy - halfH - pad, cx + halfW + pad, cy + halfH + pad],
-      pt: 0, conf: 0, note: 'empty', source: 'manual', edited: false, group: 'title', kind: 'side',
+      pt: 0, conf: 0, note: 'empty', source: 'local', edited: false, group: 'title', kind: 'side',
     });
   }
 
@@ -616,7 +616,7 @@ export function rebuildLeftMarginTextRegions(
           out.push({
             id: uuid(), text: null, cx, cy,
             bbox: [cx - glyphW / 2 - pad, cy - glyphH / 2 - pad, cx + glyphW / 2 + pad, cy + glyphH / 2 + pad],
-            pt: 0, conf: 0, note: 'empty', source: 'manual', edited: false, group: 'title', kind: 'side',
+            pt: 0, conf: 0, note: 'empty', source: 'local', edited: false, group: 'title', kind: 'side',
           });
         }
       }
@@ -776,7 +776,7 @@ export function rebuildLeftMarginTextRegions(
     out.push({
       id: uuid(), text: null, cx: columnX, cy,
       bbox: [columnX - pageGlyphSide / 2, cy - pageGlyphSide / 2, columnX + pageGlyphSide / 2, cy + pageGlyphSide / 2],
-      pt: 0, conf: 0, note: 'empty', source: 'manual', edited: false, group: 'pageno', kind: 'side',
+      pt: 0, conf: 0, note: 'empty', source: 'local', edited: false, group: 'pageno', kind: 'side',
     });
   }
   return out;
@@ -856,7 +856,7 @@ export function rebuildRightMarginTextRegions(
         cx: columnX,
         cy: (band.y0 + band.y1) / 2,
         bbox: [Math.round(columnX - colHalfW - pad), band.y0 - pad, Math.round(columnX + colHalfW + pad), band.y1 + pad],
-        pt: 0, conf: 0, note: 'empty', source: 'manual', edited: false, group: 'title', kind: 'side',
+        pt: 0, conf: 0, note: 'empty', source: 'local', edited: false, group: 'title', kind: 'side',
       });
     }
   }

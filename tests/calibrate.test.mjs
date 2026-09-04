@@ -113,4 +113,16 @@ eq('页边标题保留 title 分组', semanticResult.chars.find((c) => c.id === 
 check('排行标签不被字号聚类覆盖为正文', semanticResult.chars.filter((c) => c.id.startsWith('rank-')).every((c) => c.group === 'rank'));
 check('标题字号取标题实际高度', semanticResult.fontSizes.title > semanticResult.fontSizes.body);
 check('排行字号按自身真实高度计算', semanticResult.fontSizes.rank < semanticResult.fontSizes.body);
+
+section('噪声小框不单独成字号组');
+const noisyPage = makeSamplePage();
+noisyPage.chars = [
+  ...Array.from({ length: 6 }, (_, i) => ({ ...mkChar(40), id: `body-main-${i}` })),
+  { ...mkChar(8), id: 'node-speck-a' },
+  { ...mkChar(8), id: 'node-speck-b' },
+];
+const noisyResult = calibratePage(noisyPage);
+eq('小噪声框仍归正文组', noisyResult.chars.find((c) => c.id === 'node-speck-a').group, 'body');
+eq('小噪声框继承正文字号', noisyResult.chars.find((c) => c.id === 'node-speck-a').pt, noisyResult.fontSizes.body);
+eq('正文字号不被小框拉低', noisyResult.fontSizes.body, Math.round((40 / pxPerMm / MM_PER_PT) * 10) / 10);
 summary('calibrate');

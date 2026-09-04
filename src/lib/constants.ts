@@ -67,6 +67,8 @@ export const CHAR_MIN_SIZE = 6;
 export const CHAR_MAX_SIZE = 400;
 /** 小连通域最小面积（字符分割） */
 export const CHAR_MIN_AREA = 20;
+/** 相对本页典型字边长的下限：节点圆残墨/接头不得小于此比例 */
+export const CHAR_MIN_REL_SIDE = 0.55;
 /** 字号聚类相对容差 15%（PDF S7.1） */
 export const FONT_CLUSTER_REL_TOL = 0.15;
 /** 粘连拆分：相对典型字面积阈值（PDF S1.2） */
