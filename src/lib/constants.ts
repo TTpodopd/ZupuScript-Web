@@ -48,6 +48,8 @@ export const DICT_HIT_CONF = 0.86;
 export const DICT_CANDIDATE_CONF = 0.8;
 /** 视为「极低置信」的上限：低于此值才考虑采用 candidates 首候选 */
 export const DICT_LOW_CONF_MAX = 0.5;
+/** 竖排列尾结构字：人名「公」、妻名「氏」。补位与同形传播不得跨语义复制 */
+export const COLUMN_END_STRUCTURAL_CHARS = ['氏', '公'] as const;
 /** 大模型 max_tokens 动态系数（约每字 40 token，防整批 JSON 截断） */
 export const TOKENS_PER_CHAR = 40;
 

@@ -303,4 +303,74 @@ section('列尾补位：单证据不触发、人工字不碰、非列尾不碰')
   eq('单字孤立列不参与列尾补位', outSingle.find((c) => c.id === 'lone').text, null);
 }
 
+section('列尾补位：人名列「公」不得广播到妻名行');
+{
+  const mk = (id, cx, cy, text, conf, extra = {}) => ({
+    id, text, cx, cy, bbox: [cx - 10, cy - 10, cx + 10, cy + 10], pt: 12,
+    conf, note: text === null ? 'empty' : 'ok', source: 'local', edited: false,
+    group: 'body', kind: 'text', ...extra,
+  });
+  // 截图回归：懷德公 / 懷川公 / 懷金公 下方是 周氏 / 江氏 / 楊氏
+  const page = [
+    mk('hd1', 40, 10, '懷', 0.9), mk('hd2', 40, 40, '德', 0.9), mk('hd3', 40, 70, '公', 0.92),
+    mk('zhou', 40, 100, '周', 0.3), mk('zhouShi', 60, 100, null, 0),
+    mk('hc1', 100, 10, '懷', 0.9), mk('hc2', 100, 40, '川', 0.9), mk('hc3', 100, 70, '公', 0.9),
+    mk('jiang', 100, 100, null, 0), mk('jiangShi', 120, 100, '氏', 0.88),
+    mk('hj1', 160, 10, '懷', 0.9), mk('hj2', 160, 40, '金', 0.9), mk('hj3', 160, 70, '公', 0.91),
+    mk('yang', 160, 100, '楊', 0.4), mk('yangShi', 180, 100, null, 0),
+  ];
+  const out = fillColumnStructuralChars(page);
+  const byId = (id) => out.find((c) => c.id === id);
+  eq('周不被改成公', byId('zhou').text, '周');
+  eq('江空位不填公', byId('jiang').text, null);
+  eq('楊不被改成公', byId('yang').text, '楊');
+  eq('已识别的氏不被动', byId('jiangShi').text, '氏');
+  eq('与姓氏成对的空位补氏', byId('zhouShi').text, '氏');
+  eq('楊旁空位补氏', byId('yangShi').text, '氏');
+}
+
+section('列尾补位：廷公下的金氏不得变成氏公');
+{
+  const mk = (id, cx, cy, text, conf, extra = {}) => ({
+    id, text, cx, cy, bbox: [cx - 10, cy - 10, cx + 10, cy + 10], pt: 12,
+    conf, note: text === null ? 'empty' : 'ok', source: 'local', edited: false,
+    group: 'body', kind: 'text', ...extra,
+  });
+  const chars = [
+    mk('ting', 10, 10, '廷', 0.9),
+    mk('gong', 10, 40, '公', 0.92),
+    mk('jin', 10, 70, '金', 0.3),
+    mk('shi', 30, 70, '氏', 0.9),
+    mk('yi', 70, 10, '儀', 0.9),
+    mk('gong2', 70, 40, '公', 0.9),
+    mk('hu', 70, 70, '胡', 0.9),
+    mk('shi2', 90, 70, '氏', 0.9),
+  ];
+  const out = fillColumnStructuralChars(chars);
+  const byId = (id) => out.find((c) => c.id === id);
+  eq('金不被改成公', byId('jin').text, '金');
+  eq('氏保持氏', byId('shi').text, '氏');
+}
+
+section('列尾补位：同页公尾与氏尾互不抢位');
+{
+  const mk = (id, cx, cy, text, conf, extra = {}) => ({
+    id, text, cx, cy, bbox: [cx - 10, cy - 10, cx + 10, cy + 10], pt: 12,
+    conf, note: text === null ? 'empty' : 'ok', source: 'local', edited: false,
+    group: 'body', kind: 'text', ...extra,
+  });
+  const chars = [
+    mk('n1', 10, 10, '子', 0.9), mk('n1t', 10, 50, '公', 0.92),
+    mk('n2', 40, 10, '孫', 0.9), mk('n2t', 40, 50, '公', 0.9),
+    mk('n3', 70, 10, '曾', 0.9), mk('n3t', 70, 50, null, 0),
+    mk('w1', 130, 90, '王', 0.9), mk('w1t', 130, 120, '氏', 0.9),
+    mk('w2', 160, 90, '李', 0.9), mk('w2t', 160, 120, '氏', 0.92),
+    mk('w3', 190, 90, '趙', 0.9), mk('w3t', 190, 120, null, 0),
+  ];
+  const out = fillColumnStructuralChars(chars);
+  const byId = (id) => out.find((c) => c.id === id);
+  eq('空的人名尾仍补公', byId('n3t').text, '公');
+  eq('空的妻名尾只补氏', byId('w3t').text, '氏');
+}
+
 summary('后处理模块测试');
